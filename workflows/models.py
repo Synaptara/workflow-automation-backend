@@ -22,7 +22,7 @@ class WorkflowStep(models.Model):
     workflow = models.ForeignKey(Workflow, on_delete=models.CASCADE, related_name="steps")
     step_type = models.CharField(max_length=20, choices=STEP_TYPES)
     action_key = models.CharField(max_length=50, blank=True)  # "slack", "trello", "payment"
-    config = models.JSONField(default=dict)
+    config = models.JSONField(default=dict, blank=True)
     parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.CASCADE, related_name="children")
     branch = models.CharField(max_length=10, blank=True)  # "true" / "false" / ""
     order = models.PositiveIntegerField(default=0)

@@ -1,5 +1,6 @@
 from django.urls import re_path
+from .consumers import RunStatusConsumer
 
 websocket_urlpatterns = [
-    # Day 2/5: path("ws/runs/<uuid:run_id>/", consumers.RunStatusConsumer.as_asgi()),
+    re_path(r"ws/runs/(?P<run_id>[0-9a-f-]+)/$", RunStatusConsumer.as_asgi()),
 ]

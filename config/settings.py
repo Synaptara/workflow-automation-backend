@@ -6,7 +6,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG", default=False, cast=bool)
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = env("ALLOWED_HOSTS", default="*").split(",")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -82,6 +82,11 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    "DEFAULT_THROTTLE_RATES": {
+        # applies to the public webhook trigger endpoint only (ScopedRateThrottle,
+        # throttle_scope="webhook" on WebhookTriggerView) — keyed by client IP
+        "webhook": "60/minute",
+    },
 }
 
 SIMPLE_JWT = {
@@ -90,6 +95,8 @@ SIMPLE_JWT = {
 }
 
 CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS").split(",")
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOW_CREDENTIALS = False  # we use JWT bearer tokens, not cookies
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -105,3 +112,19 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+
+# Only enforced when DEBUG=False (i.e. in production on Render). Left off
+# locally so http://localhost keeps working without a cert.
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    # Render terminates TLS at its proxy and forwards plain HTTP internally;
+    # without this Django thinks every request is insecure and loops on redirect.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

@@ -1,1 +1,125 @@
-# Day 2: WorkflowViewSet, webhook trigger endpoint, condition evaluator wiring
+from rest_framework import viewsets, generics, permissions, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.throttling import ScopedRateThrottle
+
+from .models import Workflow, WorkflowStep, WorkflowRun
+from .serializers import (
+    RegisterSerializer,
+    WorkflowSerializer,
+    WorkflowStepSerializer,
+    WorkflowRunSerializer,
+)
+from .tasks import run_workflow
+from .executors import EXECUTOR_REGISTRY
+from .condition import OPERATORS
+
+STEP_TYPES = {"trigger", "condition", "action"}
+
+
+class RegisterView(generics.CreateAPIView):
+    serializer_class = RegisterSerializer
+    permission_classes = [permissions.AllowAny]
+
+
+def _validate_step(s):
+    """Returns an error string, or None if the step is valid.
+    Keeps garbage graphs (bad operators, unknown executors) out of the DB
+    instead of letting them fail at run time."""
+    step_type = s.get("step_type")
+    if step_type not in STEP_TYPES:
+        return f"Invalid step_type: {step_type!r}"
+
+    if step_type == "action":
+        action_key = s.get("action_key", "")
+        if action_key not in EXECUTOR_REGISTRY:
+            return f"Unknown action_key: {action_key!r} (available: {list(EXECUTOR_REGISTRY)})"
+
+    if step_type == "condition":
+        config = s.get("config", {})
+        if not isinstance(config, dict):
+            return "Condition config must be an object"
+        operator = config.get("operator", "==")
+        if operator not in OPERATORS:
+            return f"Unsupported operator: {operator!r}"
+
+    config = s.get("config", {})
+    if not isinstance(config, dict):
+        return "config must be an object"
+    if len(str(config)) > 5000:
+        return "config is too large (max ~5000 chars)"
+
+    return None
+
+
+class WorkflowViewSet(viewsets.ModelViewSet):
+    serializer_class = WorkflowSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Workflow.objects.filter(owner=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+    @action(detail=True, methods=["put"], url_path="steps")
+    def save_steps(self, request, pk=None):
+        """Replaces the entire step graph for a workflow in one call.
+        Expects: {"steps": [{"client_id": "n1", "step_type": "trigger", ...,
+                              "parent_client_id": null, "branch": ""}, ...]}
+        """
+        workflow = self.get_object()
+        steps_data = request.data.get("steps", [])
+
+        for s in steps_data:
+            error = _validate_step(s)
+            if error:
+                return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        workflow.steps.all().delete()
+        id_map = {}
+        created = []
+        for s in steps_data:
+            obj = WorkflowStep.objects.create(
+                workflow=workflow,
+                step_type=s["step_type"],
+                action_key=s.get("action_key", ""),
+                config=s.get("config", {}),
+                branch=s.get("branch", ""),
+                order=s.get("order", 0),
+            )
+            id_map[s["client_id"]] = obj
+            created.append((s, obj))
+
+        for s, obj in created:
+            parent_client_id = s.get("parent_client_id")
+            if parent_client_id:
+                obj.parent = id_map[parent_client_id]
+                obj.save(update_fields=["parent"])
+
+        return Response(WorkflowStepSerializer(workflow.steps.all(), many=True).data)
+
+    @action(detail=True, methods=["get"], url_path="runs")
+    def runs(self, request, pk=None):
+        workflow = self.get_object()
+        runs = workflow.runs.order_by("-started_at")[:50]
+        return Response(WorkflowRunSerializer(runs, many=True).data)
+
+
+class WebhookTriggerView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "webhook"
+
+    def post(self, request, workflow_id, secret):
+        try:
+            workflow = Workflow.objects.get(
+                id=workflow_id, webhook_secret=secret, is_active=True
+            )
+        except Workflow.DoesNotExist:
+            return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        run = WorkflowRun.objects.create(workflow=workflow, trigger_payload=request.data)
+        run_workflow.delay(str(run.id))
+        return Response({"run_id": str(run.id)}, status=status.HTTP_202_ACCEPTED)
