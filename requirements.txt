@@ -9,3 +9,4 @@ django-cors-headers>=4.4
 djangorestframework-simplejwt>=5.3
 python-decouple>=3.8
 daphne>=4.1
+requests>=2.31.0
