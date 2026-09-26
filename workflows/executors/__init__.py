@@ -15,3 +15,5 @@ def register(key):
 # Without this, EXECUTOR_REGISTRY stays empty no matter what action_key you use.
 from . import slack   # noqa: E402,F401
 from . import trello  # noqa: E402,F401
+from . import email
+from . import http_request
