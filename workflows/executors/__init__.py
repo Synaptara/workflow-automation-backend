@@ -17,3 +17,5 @@ from . import slack   # noqa: E402,F401
 from . import trello  # noqa: E402,F401
 from . import email
 from . import http_request
+from . import discord
+from . import google_sheets

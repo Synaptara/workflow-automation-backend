@@ -17,6 +17,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class WorkflowStepSerializer(serializers.ModelSerializer):
+    config = serializers.JSONField(required=False, default=dict)
     class Meta:
         model = WorkflowStep
         fields = ["id", "step_type", "action_key", "config", "parent", "branch", "order"]

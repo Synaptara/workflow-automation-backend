@@ -20,6 +20,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "channels",
     "workflows",
+    'django_celery_beat',
 ]
 
 MIDDLEWARE = [

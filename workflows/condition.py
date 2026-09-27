@@ -1,17 +1,17 @@
 """
 Structured condition config shape:
-{"field": "budget", "operator": ">", "value": 5000}
-"field" supports dot-notation into the trigger payload, e.g. "customer.plan"
+{"field": "trigger.budget", "operator": ">", "value": 5000}
+"field" supports deep dot-notation into the global context, e.g. "trigger.customer.plan" or "n12345.response.id"
 """
 
 OPERATORS = {
-    "==": lambda a, b: a == b,
-    "!=": lambda a, b: a != b,
+    "==": lambda a, b: str(a) == str(b) if a is not None else False,
+    "!=": lambda a, b: str(a) != str(b) if a is not None else False,
     ">": lambda a, b: a > b,
     "<": lambda a, b: a < b,
     ">=": lambda a, b: a >= b,
     "<=": lambda a, b: a <= b,
-    "contains": lambda a, b: b in a if a is not None else False,
+    "contains": lambda a, b: str(b).lower() in str(a).lower() if a is not None and b is not None else False,
 }
 
 
@@ -36,6 +36,7 @@ def evaluate_condition(config: dict, context: dict) -> bool:
 
     actual = _resolve(field, context)
 
+    # Cast to floats for mathematical operations
     if operator in (">", "<", ">=", "<="):
         try:
             actual = float(actual)

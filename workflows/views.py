@@ -1,8 +1,10 @@
+import json
 from rest_framework import viewsets, generics, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.throttling import ScopedRateThrottle
+from django_celery_beat.models import PeriodicTask, IntervalSchedule
 
 from .models import Workflow, WorkflowStep, WorkflowRun
 from .serializers import (
@@ -24,9 +26,6 @@ class RegisterView(generics.CreateAPIView):
 
 
 def _validate_step(s):
-    """Returns an error string, or None if the step is valid.
-    Keeps garbage graphs (bad operators, unknown executors) out of the DB
-    instead of letting them fail at run time."""
     step_type = s.get("step_type")
     if step_type not in STEP_TYPES:
         return f"Invalid step_type: {step_type!r}"
@@ -65,10 +64,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["put"], url_path="steps")
     def save_steps(self, request, pk=None):
-        """Replaces the entire step graph for a workflow in one call.
-        Expects: {"steps": [{"client_id": "n1", "step_type": "trigger", ...,
-                              "parent_client_id": null, "branch": ""}, ...]}
-        """
         workflow = self.get_object()
         steps_data = request.data.get("steps", [])
 
@@ -83,6 +78,7 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         for s in steps_data:
             obj = WorkflowStep.objects.create(
                 workflow=workflow,
+                client_id=s.get("client_id", ""),
                 step_type=s["step_type"],
                 action_key=s.get("action_key", ""),
                 config=s.get("config", {}),
@@ -97,6 +93,38 @@ class WorkflowViewSet(viewsets.ModelViewSet):
             if parent_client_id:
                 obj.parent = id_map[parent_client_id]
                 obj.save(update_fields=["parent"])
+
+        # ---> NEW SCHEDULING LOGIC STARTS HERE <---
+        has_schedule = False
+        for s, obj in created:
+            # We are assuming you will use "schedule" as the action_key for your new trigger node type
+            if obj.step_type == "trigger" and obj.action_key == "schedule":
+                has_schedule = True
+                # Default to 15 minutes if not provided in the frontend config
+                interval_minutes = int(obj.config.get("interval", 15))
+                
+                # Get or create the time interval in the database
+                schedule, _ = IntervalSchedule.objects.get_or_create(
+                    every=interval_minutes,
+                    period=IntervalSchedule.MINUTES,
+                )
+                
+                # Link the interval to our trigger task
+                PeriodicTask.objects.update_or_create(
+                    name=f"workflow-schedule-{workflow.id}",
+                    defaults={
+                        "interval": schedule,
+                        "task": "workflows.tasks.trigger_scheduled_workflow",
+                        "args": json.dumps([str(workflow.id)]),
+                        "enabled": workflow.is_active
+                    }
+                )
+                break
+                
+        # If they removed the schedule node (or changed it to a webhook), clean up the cron job
+        if not has_schedule:
+            PeriodicTask.objects.filter(name=f"workflow-schedule-{workflow.id}").delete()
+        # ---> SCHEDULING LOGIC ENDS HERE <---
 
         return Response(WorkflowStepSerializer(workflow.steps.all(), many=True).data)
 
@@ -113,6 +141,15 @@ class WebhookTriggerView(APIView):
     throttle_scope = "webhook"
 
     def post(self, request, workflow_id, secret):
+        # HARDENED: Prevent Memory/OOM attacks by rejecting payloads > 1MB instantly
+        content_length = request.META.get('CONTENT_LENGTH')
+        if content_length and int(content_length) > 1024 * 1024:
+            return Response({"detail": "Payload too large. Maximum size is 1MB."}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+
+        # HARDENED: Guarantee the incoming data is a structured JSON dictionary, not a malicious array/string
+        if not isinstance(request.data, dict):
+            return Response({"detail": "Invalid payload format. Expected a JSON object."}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
             workflow = Workflow.objects.get(
                 id=workflow_id, webhook_secret=secret, is_active=True
