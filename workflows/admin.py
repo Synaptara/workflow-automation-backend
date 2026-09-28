@@ -1,5 +1,6 @@
 from django.contrib import admin
-from .models import Workflow, WorkflowStep, WorkflowRun, StepRun, Credential
+
+from .models import Credential, StepRun, Workflow, WorkflowRun, WorkflowStep
 
 admin.site.register(Workflow)
 admin.site.register(WorkflowStep)

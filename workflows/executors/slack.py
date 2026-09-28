@@ -1,7 +1,8 @@
 import requests
 
-from .base import BaseExecutor
 from . import register
+from .base import BaseExecutor
+
 
 @register("slack")
 class SlackExecutor(BaseExecutor):
@@ -9,6 +10,7 @@ class SlackExecutor(BaseExecutor):
     Requires config: {"webhook_url": str, "text": str}
     Variables like {{trigger.budget}} are already parsed by the core engine before reaching here.
     """
+
     def execute(self, config: dict, context: dict) -> dict:
         webhook_url = config.get("webhook_url")
         # Text is already fully injected with dynamic variables

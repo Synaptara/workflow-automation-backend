@@ -1,7 +1,10 @@
-import requests
 import json
-from .base import BaseExecutor
+
+import requests
+
 from . import register
+from .base import BaseExecutor
+
 
 @register("http")
 class HTTPExecutor(BaseExecutor):
@@ -9,10 +12,11 @@ class HTTPExecutor(BaseExecutor):
     Executes a generic HTTP request.
     Config expects: {"method": str, "url": str, "headers": str (JSON), "body": str (JSON)}
     """
+
     def execute(self, config: dict, context: dict) -> dict:
         method = config.get("method", "GET").upper()
         url = config.get("url")
-        
+
         # Parse the headers safely
         headers_str = config.get("headers", "").strip()
         headers_dict = {}
@@ -39,20 +43,24 @@ class HTTPExecutor(BaseExecutor):
         # Make the dynamic request
         if isinstance(payload, dict):
             # Sends as application/json
-            resp = requests.request(method=method, url=url, headers=headers_dict, json=payload, timeout=10)
+            resp = requests.request(
+                method=method, url=url, headers=headers_dict, json=payload, timeout=10
+            )
         else:
             # FIX: Convert raw numbers/booleans to strings to prevent urllib3 crashes
             if payload is not None and not isinstance(payload, (str, bytes)):
                 payload = json.dumps(payload)
-                
+
             # Sends as text/plain or whatever is specified in custom headers
-            resp = requests.request(method=method, url=url, headers=headers_dict, data=payload, timeout=10)
-            
+            resp = requests.request(
+                method=method, url=url, headers=headers_dict, data=payload, timeout=10
+            )
+
         resp.raise_for_status()
-        
+
         try:
             resp_data = resp.json()
         except ValueError:
             resp_data = resp.text
-            
+
         return {"status_code": resp.status_code, "response": resp_data}

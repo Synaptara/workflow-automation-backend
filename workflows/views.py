@@ -1,21 +1,22 @@
 import json
-from rest_framework import viewsets, generics, permissions, status
+
+from django_celery_beat.models import IntervalSchedule, PeriodicTask
+from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.views import APIView
 from rest_framework.throttling import ScopedRateThrottle
-from django_celery_beat.models import PeriodicTask, IntervalSchedule
+from rest_framework.views import APIView
 
-from .models import Workflow, WorkflowStep, WorkflowRun
+from .condition import OPERATORS
+from .executors import EXECUTOR_REGISTRY
+from .models import Workflow, WorkflowRun, WorkflowStep
 from .serializers import (
     RegisterSerializer,
+    WorkflowRunSerializer,
     WorkflowSerializer,
     WorkflowStepSerializer,
-    WorkflowRunSerializer,
 )
 from .tasks import run_workflow
-from .executors import EXECUTOR_REGISTRY
-from .condition import OPERATORS
 
 STEP_TYPES = {"trigger", "condition", "action"}
 
@@ -102,13 +103,13 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 has_schedule = True
                 # Default to 15 minutes if not provided in the frontend config
                 interval_minutes = int(obj.config.get("interval", 15))
-                
+
                 # Get or create the time interval in the database
                 schedule, _ = IntervalSchedule.objects.get_or_create(
                     every=interval_minutes,
                     period=IntervalSchedule.MINUTES,
                 )
-                
+
                 # Link the interval to our trigger task
                 PeriodicTask.objects.update_or_create(
                     name=f"workflow-schedule-{workflow.id}",
@@ -116,14 +117,16 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                         "interval": schedule,
                         "task": "workflows.tasks.trigger_scheduled_workflow",
                         "args": json.dumps([str(workflow.id)]),
-                        "enabled": workflow.is_active
-                    }
+                        "enabled": workflow.is_active,
+                    },
                 )
                 break
-                
+
         # If they removed the schedule node (or changed it to a webhook), clean up the cron job
         if not has_schedule:
-            PeriodicTask.objects.filter(name=f"workflow-schedule-{workflow.id}").delete()
+            PeriodicTask.objects.filter(
+                name=f"workflow-schedule-{workflow.id}"
+            ).delete()
         # ---> SCHEDULING LOGIC ENDS HERE <---
 
         return Response(WorkflowStepSerializer(workflow.steps.all(), many=True).data)
@@ -142,13 +145,19 @@ class WebhookTriggerView(APIView):
 
     def post(self, request, workflow_id, secret):
         # HARDENED: Prevent Memory/OOM attacks by rejecting payloads > 1MB instantly
-        content_length = request.META.get('CONTENT_LENGTH')
+        content_length = request.META.get("CONTENT_LENGTH")
         if content_length and int(content_length) > 1024 * 1024:
-            return Response({"detail": "Payload too large. Maximum size is 1MB."}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+            return Response(
+                {"detail": "Payload too large. Maximum size is 1MB."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
 
         # HARDENED: Guarantee the incoming data is a structured JSON dictionary, not a malicious array/string
         if not isinstance(request.data, dict):
-            return Response({"detail": "Invalid payload format. Expected a JSON object."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Invalid payload format. Expected a JSON object."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             workflow = Workflow.objects.get(
@@ -157,6 +166,8 @@ class WebhookTriggerView(APIView):
         except Workflow.DoesNotExist:
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        run = WorkflowRun.objects.create(workflow=workflow, trigger_payload=request.data)
+        run = WorkflowRun.objects.create(
+            workflow=workflow, trigger_payload=request.data
+        )
         run_workflow.delay(str(run.id))
         return Response({"run_id": str(run.id)}, status=status.HTTP_202_ACCEPTED)

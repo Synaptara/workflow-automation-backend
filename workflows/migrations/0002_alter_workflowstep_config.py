@@ -4,15 +4,14 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('workflows', '0001_initial'),
+        ("workflows", "0001_initial"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='workflowstep',
-            name='config',
+            model_name="workflowstep",
+            name="config",
             field=models.JSONField(blank=True, default=dict),
         ),
     ]

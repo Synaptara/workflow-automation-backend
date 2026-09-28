@@ -1,8 +1,8 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
-from django.urls import path
 
-from .views import RegisterView, WorkflowViewSet, WebhookTriggerView
+from .views import RegisterView, WebhookTriggerView, WorkflowViewSet
 
 router = DefaultRouter()
 router.register("workflows", WorkflowViewSet, basename="workflow")

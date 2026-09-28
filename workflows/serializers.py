@@ -2,7 +2,7 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from .models import Workflow, WorkflowStep, WorkflowRun, StepRun
+from .models import StepRun, Workflow, WorkflowRun, WorkflowStep
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -18,9 +18,18 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 class WorkflowStepSerializer(serializers.ModelSerializer):
     config = serializers.JSONField(required=False, default=dict)
+
     class Meta:
         model = WorkflowStep
-        fields = ["id", "step_type", "action_key", "config", "parent", "branch", "order"]
+        fields = [
+            "id",
+            "step_type",
+            "action_key",
+            "config",
+            "parent",
+            "branch",
+            "order",
+        ]
 
 
 class WorkflowSerializer(serializers.ModelSerializer):
@@ -29,7 +38,15 @@ class WorkflowSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Workflow
-        fields = ["id", "name", "is_active", "created_at", "webhook_secret", "webhook_url", "steps"]
+        fields = [
+            "id",
+            "name",
+            "is_active",
+            "created_at",
+            "webhook_secret",
+            "webhook_url",
+            "steps",
+        ]
         read_only_fields = ["webhook_secret"]
 
     def get_webhook_url(self, obj):
@@ -42,7 +59,17 @@ class StepRunSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = StepRun
-        fields = ["id", "step", "step_type", "action_key", "status", "output", "error", "started_at", "finished_at"]
+        fields = [
+            "id",
+            "step",
+            "step_type",
+            "action_key",
+            "status",
+            "output",
+            "error",
+            "started_at",
+            "finished_at",
+        ]
 
 
 class WorkflowRunSerializer(serializers.ModelSerializer):
@@ -50,4 +77,11 @@ class WorkflowRunSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = WorkflowRun
-        fields = ["id", "status", "trigger_payload", "started_at", "finished_at", "step_runs"]
+        fields = [
+            "id",
+            "status",
+            "trigger_payload",
+            "started_at",
+            "finished_at",
+            "step_runs",
+        ]

@@ -11,7 +11,9 @@ OPERATORS = {
     "<": lambda a, b: a < b,
     ">=": lambda a, b: a >= b,
     "<=": lambda a, b: a <= b,
-    "contains": lambda a, b: str(b).lower() in str(a).lower() if a is not None and b is not None else False,
+    "contains": lambda a, b: (
+        str(b).lower() in str(a).lower() if a is not None and b is not None else False
+    ),
 }
 
 

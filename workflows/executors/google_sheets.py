@@ -1,6 +1,8 @@
 import requests
-from .base import BaseExecutor
+
 from . import register
+from .base import BaseExecutor
+
 
 @register("google_sheets")
 class GoogleSheetsExecutor(BaseExecutor):
@@ -9,9 +11,11 @@ class GoogleSheetsExecutor(BaseExecutor):
         spreadsheet_id = config.get("spreadsheet_id")
         sheet_range = config.get("range", "Sheet1!A:A")
         raw_values = config.get("values", "")
-        
+
         if not all([access_token, spreadsheet_id, raw_values]):
-            raise ValueError("Google Sheets requires an access token, spreadsheet ID, and values.")
+            raise ValueError(
+                "Google Sheets requires an access token, spreadsheet ID, and values."
+            )
 
         row_data = [val.strip() for val in raw_values.split(",") if val.strip()]
 
@@ -19,14 +23,12 @@ class GoogleSheetsExecutor(BaseExecutor):
         params = {"valueInputOption": "USER_ENTERED"}
         headers = {
             "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
-        payload = {
-            "values": [row_data]
-        }
+
+        payload = {"values": [row_data]}
 
         resp = requests.post(url, params=params, headers=headers, json=payload)
         resp.raise_for_status()
-        
+
         return resp.json()

@@ -1,6 +1,7 @@
 import json
-from channels.generic.websocket import AsyncWebsocketConsumer
+
 from channels.db import database_sync_to_async
+from channels.generic.websocket import AsyncWebsocketConsumer
 
 
 class RunStatusConsumer(AsyncWebsocketConsumer):
@@ -23,10 +24,13 @@ class RunStatusConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def _run_belongs_to_user(self, run_id, user):
         from .models import WorkflowRun
+
         return WorkflowRun.objects.filter(id=run_id, workflow__owner=user).exists()
 
     async def disconnect(self, close_code):
         await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
     async def run_event(self, event):
-        await self.send(text_data=json.dumps({"event": event["event"], "data": event["data"]}))
+        await self.send(
+            text_data=json.dumps({"event": event["event"], "data": event["data"]})
+        )

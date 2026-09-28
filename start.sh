@@ -2,6 +2,10 @@
 
 python manage.py migrate
 
+# Start the Celery Beat scheduler in the background (The Clock)
+celery -A config beat -l info &
+
+# Start the Celery Worker in the background (The Muscle)
 celery -A config worker -l info --concurrency=1 &
 
 # Notice the ${PORT:-8000} syntax

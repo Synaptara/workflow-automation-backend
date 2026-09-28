@@ -1,7 +1,7 @@
 import requests
 
-from .base import BaseExecutor
 from . import register
+from .base import BaseExecutor
 
 TRELLO_API = "https://api.trello.com/1/cards"
 
@@ -12,7 +12,11 @@ class TrelloExecutor(BaseExecutor):
     key/token can also be pulled from a stored Credential and merged in before calling execute()."""
 
     def execute(self, config: dict, context: dict) -> dict:
-        name = config.get("name_template", "New card").format(**context) if "{" in config.get("name_template", "") else config.get("name_template", "New card")
+        name = (
+            config.get("name_template", "New card").format(**context)
+            if "{" in config.get("name_template", "")
+            else config.get("name_template", "New card")
+        )
         desc = config.get("desc_template", "")
 
         params = {
