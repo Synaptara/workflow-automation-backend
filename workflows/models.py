@@ -21,18 +21,15 @@ class EncryptedJSONField(models.TextField):
             return value
         if not isinstance(value, str):
             value = json.dumps(value)
-        # Encrypt the string and save it to the database
         return _fernet.encrypt(value.encode("utf-8")).decode("utf-8")
 
     def from_db_value(self, value, expression, connection):
         if value is None:
             return value
         try:
-            # Attempt to decrypt
             decrypted = _fernet.decrypt(value.encode("utf-8")).decode("utf-8")
             return json.loads(decrypted)
         except Exception:
-            # Graceful fallback: If it fails to decrypt, it's likely old plaintext data
             try:
                 return json.loads(value)
             except Exception:
@@ -42,6 +39,19 @@ class EncryptedJSONField(models.TextField):
         if isinstance(value, (dict, list)) or value is None:
             return value
         return self.from_db_value(value, None, None)
+
+
+class TaskUsage(models.Model):
+    """Tracks the number of successful action executions per user."""
+
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="task_usage"
+    )
+    count = models.PositiveIntegerField(default=0)
+    limit = models.PositiveIntegerField(default=1000)  # Default free tier limit
+
+    def __str__(self):
+        return f"{self.user.username} Usage: {self.count}/{self.limit}"
 
 
 class Workflow(models.Model):
@@ -70,10 +80,7 @@ class WorkflowStep(models.Model):
     )
     step_type = models.CharField(max_length=20, choices=STEP_TYPES)
     action_key = models.CharField(max_length=50, blank=True)
-
-    # ENCRYPTED: Uses our new custom field
     config = EncryptedJSONField(default=dict, blank=True)
-
     parent = models.ForeignKey(
         "self", null=True, blank=True, on_delete=models.CASCADE, related_name="children"
     )
@@ -121,8 +128,21 @@ class Credential(models.Model):
         User, on_delete=models.CASCADE, related_name="credentials"
     )
     service = models.CharField(max_length=50)
-
-    # ENCRYPTED: Uses our new custom field
     data = EncryptedJSONField(default=dict)
-
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("owner", "service")
+
+
+class TriggerState(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.OneToOneField(
+        Workflow, on_delete=models.CASCADE, related_name="trigger_state"
+    )
+    last_seen_id = models.CharField(max_length=255, blank=True, null=True)
+    last_checked_at = models.DateTimeField(auto_now=True)
+    state_data = models.JSONField(default=dict, blank=True)
+
+    def __str__(self):
+        return f"State: {self.workflow.name} ({self.last_seen_id})"

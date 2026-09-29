@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 
 from .condition import OPERATORS
 from .executors import EXECUTOR_REGISTRY
-from .models import Workflow, WorkflowRun, WorkflowStep
+from .models import Credential, TaskUsage, Workflow, WorkflowRun, WorkflowStep
 from .serializers import (
     RegisterSerializer,
     WorkflowRunSerializer,
@@ -95,22 +95,15 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 obj.parent = id_map[parent_client_id]
                 obj.save(update_fields=["parent"])
 
-        # ---> NEW SCHEDULING LOGIC STARTS HERE <---
         has_schedule = False
         for s, obj in created:
-            # We are assuming you will use "schedule" as the action_key for your new trigger node type
             if obj.step_type == "trigger" and obj.action_key == "schedule":
                 has_schedule = True
-                # Default to 15 minutes if not provided in the frontend config
                 interval_minutes = int(obj.config.get("interval", 15))
-
-                # Get or create the time interval in the database
                 schedule, _ = IntervalSchedule.objects.get_or_create(
                     every=interval_minutes,
                     period=IntervalSchedule.MINUTES,
                 )
-
-                # Link the interval to our trigger task
                 PeriodicTask.objects.update_or_create(
                     name=f"workflow-schedule-{workflow.id}",
                     defaults={
@@ -122,12 +115,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 )
                 break
 
-        # If they removed the schedule node (or changed it to a webhook), clean up the cron job
         if not has_schedule:
             PeriodicTask.objects.filter(
                 name=f"workflow-schedule-{workflow.id}"
             ).delete()
-        # ---> SCHEDULING LOGIC ENDS HERE <---
 
         return Response(WorkflowStepSerializer(workflow.steps.all(), many=True).data)
 
@@ -138,25 +129,79 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         return Response(WorkflowRunSerializer(runs, many=True).data)
 
 
+class GlobalRunHistoryView(generics.ListAPIView):
+    """Fetches the 100 most recent runs across ALL of the user's workflows."""
+
+    serializer_class = WorkflowRunSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            WorkflowRun.objects.filter(workflow__owner=self.request.user)
+            .select_related("workflow")
+            .order_by("-started_at")[:100]
+        )
+
+
+class CredentialViewSet(viewsets.ViewSet):
+    """Manages the encrypted Integrations Vault."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def create(self, request):
+        service = request.data.get("service")
+        data = request.data.get("data", {})
+        if not service:
+            return Response(
+                {"error": "Service name required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        Credential.objects.update_or_create(
+            owner=request.user, service=service, defaults={"data": data}
+        )
+        return Response({"status": "success"})
+
+    def list(self, request):
+        # Only return the keys/service names, never the decrypted payloads
+        creds = Credential.objects.filter(owner=request.user)
+        return Response([c.service for c in creds])
+
+    def destroy(self, request, pk=None):
+        Credential.objects.filter(owner=request.user, service=pk).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TaskUsageView(APIView):
+    """Returns the user's current billing/task usage metrics."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        usage, _ = TaskUsage.objects.get_or_create(user=request.user)
+        percent = (
+            min(100, int((usage.count / usage.limit) * 100)) if usage.limit > 0 else 0
+        )
+        return Response(
+            {"count": usage.count, "limit": usage.limit, "percentage": percent}
+        )
+
+
 class WebhookTriggerView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "webhook"
 
     def post(self, request, workflow_id, secret):
-        # HARDENED: Prevent Memory/OOM attacks by rejecting payloads > 1MB instantly
         content_length = request.META.get("CONTENT_LENGTH")
         if content_length and int(content_length) > 1024 * 1024:
             return Response(
-                {"detail": "Payload too large. Maximum size is 1MB."},
+                {"detail": "Payload too large."},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
 
-        # HARDENED: Guarantee the incoming data is a structured JSON dictionary, not a malicious array/string
         if not isinstance(request.data, dict):
             return Response(
-                {"detail": "Invalid payload format. Expected a JSON object."},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"detail": "Expected JSON object."}, status=status.HTTP_400_BAD_REQUEST
             )
 
         try:
