@@ -14,4 +14,13 @@ def register(key):
 # These imports MUST come after `register` is defined above — each module's
 # @register("...") decorator runs at import time and needs it to exist.
 # Without this, EXECUTOR_REGISTRY stays empty no matter what action_key you use.
-from . import discord, email, google_sheets, groq_ai, http_request, slack, trello
+from . import (
+    discord,
+    email,
+    google_sheets,
+    groq_ai,
+    http_request,
+    notion,
+    slack,
+    trello,
+)

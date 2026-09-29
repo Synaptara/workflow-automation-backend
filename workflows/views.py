@@ -128,6 +128,99 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         runs = workflow.runs.order_by("-started_at")[:50]
         return Response(WorkflowRunSerializer(runs, many=True).data)
 
+        # ... inside WorkflowViewSet ...
+
+        @action(detail=False, methods=["get"])
+        def templates(self, request):
+            """Returns a list of pre-built workflow templates."""
+            templates = [
+                {
+                    "id": "trello-to-discord",
+                    "name": "Trello to Discord Alert",
+                    "description": "Automatically send a Discord message when a new Trello card is created.",
+                    "color": "#5865F2",
+                    "steps": [
+                        {
+                            "client_id": "trigger_1",
+                            "step_type": "trigger",
+                            "action_key": "trello_new_card",
+                            "config": {"ui_pos": {"x": 250, "y": 200}},
+                        },
+                        {
+                            "client_id": "action_1",
+                            "step_type": "action",
+                            "action_key": "discord",
+                            "config": {
+                                "content": "New Trello Card Created: {{trigger.name}}\n{{trigger.url}}",
+                                "ui_pos": {"x": 600, "y": 200},
+                            },
+                            "parent_client_id": "trigger_1",
+                        },
+                    ],
+                },
+                {
+                    "id": "webhook-to-notion",
+                    "name": "Save Webhook Data to Notion",
+                    "description": "Listen for incoming data and log it directly into a Notion database as a new page.",
+                    "color": "#000000",
+                    "steps": [
+                        {
+                            "client_id": "trigger_1",
+                            "step_type": "trigger",
+                            "action_key": "webhook",
+                            "config": {"ui_pos": {"x": 250, "y": 200}},
+                        },
+                        {
+                            "client_id": "action_1",
+                            "step_type": "action",
+                            "action_key": "notion",
+                            "config": {
+                                "title": "New Webhook Alert",
+                                "content": "Received Payload: {{trigger}}",
+                                "ui_pos": {"x": 600, "y": 200},
+                            },
+                            "parent_client_id": "trigger_1",
+                        },
+                    ],
+                },
+            ]
+            return Response(templates)
+
+        @action(detail=False, methods=["post"])
+        def use_template(self, request):
+            """Clones a template into a real workflow for the authenticated user."""
+            template_name = request.data.get("name", "New Workflow from Template")
+            steps_data = request.data.get("steps", [])
+
+            # Create the workflow
+            workflow = Workflow.objects.create(owner=request.user, name=template_name)
+
+            # Clone the steps
+            id_map = {}
+            created = []
+            for s in steps_data:
+                obj = WorkflowStep.objects.create(
+                    workflow=workflow,
+                    client_id=s.get("client_id", ""),
+                    step_type=s["step_type"],
+                    action_key=s.get("action_key", ""),
+                    config=s.get("config", {}),
+                )
+                id_map[s["client_id"]] = obj
+                created.append((s, obj))
+
+            # Wire up the parent/child edges
+            for s, obj in created:
+                parent_client_id = s.get("parent_client_id")
+                if parent_client_id:
+                    obj.parent = id_map[parent_client_id]
+                    obj.save(update_fields=["parent"])
+
+            return Response(
+                {"id": workflow.id, "name": workflow.name},
+                status=status.HTTP_201_CREATED,
+            )
+
 
 class GlobalRunHistoryView(generics.ListAPIView):
     """Fetches the 100 most recent runs across ALL of the user's workflows."""
