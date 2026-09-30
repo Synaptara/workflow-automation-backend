@@ -21,9 +21,128 @@ from .tasks import run_workflow
 STEP_TYPES = {"trigger", "condition", "action"}
 
 
+import requests
+from decouple import config
+from django.contrib.auth.models import User
+from rest_framework_simplejwt.tokens import RefreshToken
+
+
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+
+
+class SocialAuthView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, provider):
+        code = request.data.get("code")
+        if not code:
+            return Response(
+                {"error": "No code provided"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        email = None
+        username = None
+        frontend_url = config("FRONTEND_URL", default="http://localhost:5173")
+
+        if provider == "google":
+            token_res = requests.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": config("GOOGLE_CLIENT_ID"),
+                    "client_secret": config("GOOGLE_CLIENT_SECRET"),
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": f"{frontend_url}/auth/callback/google",
+                },
+                timeout=10,
+            )
+            if not token_res.ok:
+                return Response(
+                    {"error": "Failed to exchange Google token"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            access_token = token_res.json().get("access_token")
+
+            user_res = requests.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            user_data = user_res.json()
+            email = user_data.get("email")
+            username = email.split("@")[0] if email else None
+
+        elif provider == "github":
+            token_res = requests.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data={
+                    "client_id": config("GITHUB_CLIENT_ID"),
+                    "client_secret": config("GITHUB_CLIENT_SECRET"),
+                    "code": code,
+                    "redirect_uri": f"{frontend_url}/auth/callback/github",
+                },
+                timeout=10,
+            )
+            if not token_res.ok:
+                return Response(
+                    {"error": "Failed to exchange GitHub token"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            access_token = token_res.json().get("access_token")
+
+            user_res = requests.get(
+                "https://api.github.com/user",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            user_data = user_res.json()
+            username = user_data.get("login")
+            email = user_data.get("email")
+
+            if not email:
+                email_res = requests.get(
+                    "https://api.github.com/user/emails",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=10,
+                )
+                emails = email_res.json()
+                primary_email = next((e for e in emails if e.get("primary")), None)
+                if primary_email:
+                    email = primary_email.get("email")
+
+        else:
+            return Response(
+                {"error": "Invalid provider"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not email:
+            return Response(
+                {"error": "Could not retrieve email from provider"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Secure User Matching Logic
+        # Strict Provider Isolation Logic
+        # This forces google_user@email.com and github_user@email.com to be two totally separate accounts.
+        provider_username = f"{provider}_{email}"
+
+        user = User.objects.filter(username=provider_username).first()
+
+        if not user:
+            user = User.objects.create_user(username=provider_username, email=email)
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            }
+        )
 
 
 def _validate_step(s):
