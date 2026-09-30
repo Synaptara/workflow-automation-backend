@@ -80,6 +80,7 @@ class WorkflowStep(models.Model):
     )
     step_type = models.CharField(max_length=20, choices=STEP_TYPES)
     action_key = models.CharField(max_length=50, blank=True)
+    app_event = models.CharField(max_length=50, blank=True)  # <--- ADD THIS LINE
     config = EncryptedJSONField(default=dict, blank=True)
     parent = models.ForeignKey(
         "self", null=True, blank=True, on_delete=models.CASCADE, related_name="children"

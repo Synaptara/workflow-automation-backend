@@ -5,6 +5,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import (
     CredentialViewSet,
     GlobalRunHistoryView,
+    IntegrationOAuthView,
     RegisterView,
     SocialAuthView,
     TaskUsageView,
@@ -21,6 +22,7 @@ urlpatterns = [
     path("auth/login/", TokenObtainPairView.as_view()),
     path("auth/refresh/", TokenRefreshView.as_view()),
     path("auth/social/<str:provider>/", SocialAuthView.as_view()),
+    path("credentials/oauth/<str:provider>/", IntegrationOAuthView.as_view()),
     path("hooks/<uuid:workflow_id>/<str:secret>/", WebhookTriggerView.as_view()),
     path("runs/history/", GlobalRunHistoryView.as_view()),
     path("usage/", TaskUsageView.as_view()),

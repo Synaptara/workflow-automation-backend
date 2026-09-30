@@ -17,16 +17,20 @@ class RegisterSerializer(serializers.ModelSerializer):
 
 
 class WorkflowStepSerializer(serializers.ModelSerializer):
-    config = serializers.JSONField(required=False, default=dict)
+    parent_client_id = serializers.CharField(source="parent.client_id", read_only=True)
+
+    # CRITICAL FIX: Tell DRF to serve this as pure JSON, not a string!
+    config = serializers.JSONField(required=False)
 
     class Meta:
         model = WorkflowStep
         fields = [
-            "id",
+            "client_id",
             "step_type",
             "action_key",
+            "app_event",
             "config",
-            "parent",
+            "parent_client_id",
             "branch",
             "order",
         ]

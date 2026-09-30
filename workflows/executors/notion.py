@@ -3,20 +3,13 @@ import requests
 from . import register
 from .base import BaseExecutor
 
-NOTION_API = "https://api.notion.com/v1/pages"
-
 
 @register("notion")
 class NotionExecutor(BaseExecutor):
-    """
-    config: {"api_key": str, "database_id": str, "title": str, "content": str}
-    """
-
-    def execute(self, config: dict, context: dict) -> dict:
-        api_key = config.get("api_key")
-        database_id = config.get("database_id")
-        title = config.get("title", "Automated Entry")
-        content = config.get("content", "")
+    def execute(self, app_event: str, step_config: dict, context: dict) -> dict:
+        api_key = step_config.get("api_key")
+        if not api_key:
+            raise ValueError("Notion API Key is required.")
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -24,25 +17,54 @@ class NotionExecutor(BaseExecutor):
             "Notion-Version": "2022-06-28",
         }
 
-        # Notion's strict block structure for creating a database row with a title and paragraph
-        payload = {
-            "parent": {"database_id": database_id},
-            "properties": {
-                "Name": {  # Default title column in Notion is usually "Name"
-                    "title": [{"text": {"content": title}}]
-                }
-            },
-            "children": [
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": content}}]
-                    },
-                }
-            ],
-        }
+        if app_event == "create_page":
+            database_id = step_config.get("database_id", "").replace("-", "")
+            title = step_config.get("title", "Untitled Page")
+            content = step_config.get("content", "")
 
-        resp = requests.post(NOTION_API, headers=headers, json=payload, timeout=10)
-        resp.raise_for_status()
-        return {"status_code": resp.status_code, "notion_url": resp.json().get("url")}
+            if not database_id:
+                raise ValueError("Database ID is required to create a Notion page.")
+
+            payload = {
+                "parent": {"database_id": database_id},
+                "properties": {
+                    "Name": {  # Default primary title column in Notion databases
+                        "title": [{"text": {"content": title}}]
+                    }
+                },
+            }
+
+            if content:
+                payload["children"] = [
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [
+                                {"type": "text", "text": {"content": content}}
+                            ]
+                        },
+                    }
+                ]
+
+            resp = requests.post(
+                "https://api.notion.com/v1/pages",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+
+            if not resp.ok:
+                raise ValueError(
+                    f"Notion API Error ({resp.status_code}): {resp.json().get('message', resp.text)}"
+                )
+
+            data = resp.json()
+            return {
+                "status": "success",
+                "page_id": data.get("id"),
+                "url": data.get("url"),
+            }
+
+        else:
+            raise ValueError(f"Unsupported Notion event: {app_event}")

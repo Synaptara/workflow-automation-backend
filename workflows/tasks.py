@@ -87,7 +87,9 @@ def _run_action_step(run, step, context, max_attempts=3):
 
     for attempt in range(1, max_attempts + 1):
         try:
-            output = executor.execute(dynamic_config, context)
+            # FIX: Pass step.app_event as the first argument so the executor knows which sub-action to run!
+            output = executor.execute(step.app_event, dynamic_config, context)
+
             step_run.status = "success"
             step_run.output = (
                 output if isinstance(output, dict) else {"result": str(output)}

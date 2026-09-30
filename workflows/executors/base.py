@@ -1,5 +1,3 @@
 class BaseExecutor:
-    """Every action executor (slack, trello, payment, ...) implements this."""
-
-    def execute(self, config: dict, context: dict) -> dict:
-        raise NotImplementedError
+    def execute(self, app_event: str, config: dict, context: dict) -> dict:
+        raise NotImplementedError("Executors must implement the execute method.")

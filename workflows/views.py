@@ -152,7 +152,8 @@ def _validate_step(s):
 
     if step_type == "action":
         action_key = s.get("action_key", "")
-        if action_key not in EXECUTOR_REGISTRY:
+        # FIX 1: Allow blank action_keys because our new UI drops them as unconfigured slates!
+        if action_key and action_key not in EXECUTOR_REGISTRY:
             return f"Unknown action_key: {action_key!r} (available: {list(EXECUTOR_REGISTRY)})"
 
     if step_type == "condition":
@@ -166,8 +167,9 @@ def _validate_step(s):
     config = s.get("config", {})
     if not isinstance(config, dict):
         return "config must be an object"
-    if len(str(config)) > 5000:
-        return "config is too large (max ~5000 chars)"
+
+    # FIX 2: We completely removed the `len(str(config)) > 5000` limit here.
+    # Enterprise workflows (like AI Prompts and Email bodies) will regularly exceed 5KB!
 
     return None
 
@@ -187,30 +189,38 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         workflow = self.get_object()
         steps_data = request.data.get("steps", [])
 
+        # Validate before wiping the database
         for s in steps_data:
             error = _validate_step(s)
             if error:
                 return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
+            if "client_id" not in s or not s["client_id"]:
+                return Response(
+                    {"detail": "Missing client_id in step data"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         workflow.steps.all().delete()
         id_map = {}
         created = []
         for s in steps_data:
+            client_id = s["client_id"]
             obj = WorkflowStep.objects.create(
                 workflow=workflow,
-                client_id=s.get("client_id", ""),
+                client_id=client_id,
                 step_type=s["step_type"],
                 action_key=s.get("action_key", ""),
+                app_event=s.get("app_event", ""),
                 config=s.get("config", {}),
                 branch=s.get("branch", ""),
                 order=s.get("order", 0),
             )
-            id_map[s["client_id"]] = obj
+            id_map[client_id] = obj
             created.append((s, obj))
 
         for s, obj in created:
             parent_client_id = s.get("parent_client_id")
-            if parent_client_id:
+            if parent_client_id and parent_client_id in id_map:
                 obj.parent = id_map[parent_client_id]
                 obj.save(update_fields=["parent"])
 
@@ -381,6 +391,133 @@ class CredentialViewSet(viewsets.ViewSet):
     def destroy(self, request, pk=None):
         Credential.objects.filter(owner=request.user, service=pk).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class IntegrationOAuthView(APIView):
+    """
+    Handles OAuth callbacks for the Integrations Vault.
+    Exchanges the authorization code for access/refresh tokens and stores them encrypted.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, provider):
+        code = request.data.get("code")
+        if not code:
+            return Response(
+                {"error": "No code provided"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        frontend_url = config("FRONTEND_URL", default="http://localhost:5173")
+        redirect_uri = f"{frontend_url}/integrations/callback/{provider}"
+        credential_data = {}
+
+        try:
+            if provider == "github":
+                token_res = requests.post(
+                    "https://github.com/login/oauth/access_token",
+                    headers={"Accept": "application/json"},
+                    data={
+                        "client_id": config("GITHUB_CLIENT_ID"),
+                        "client_secret": config("GITHUB_CLIENT_SECRET"),
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                    },
+                    timeout=10,
+                )
+                if not token_res.ok:
+                    return Response(
+                        {"error": "GitHub token exchange failed"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                res_data = token_res.json()
+                credential_data = {
+                    "access_token": res_data.get("access_token"),
+                    "token_type": res_data.get("token_type", "bearer"),
+                    "scope": res_data.get("scope"),
+                }
+
+            elif provider == "google_sheets":
+                token_res = requests.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": config("GOOGLE_CLIENT_ID"),
+                        "client_secret": config("GOOGLE_CLIENT_SECRET"),
+                        "code": code,
+                        "grant_type": "authorization_code",
+                        "redirect_uri": redirect_uri,
+                    },
+                    timeout=10,
+                )
+                if not token_res.ok:
+                    return Response(
+                        {"error": "Google token exchange failed"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                res_data = token_res.json()
+                credential_data = {
+                    "access_token": res_data.get("access_token"),
+                    "refresh_token": res_data.get(
+                        "refresh_token"
+                    ),  # Crucial for background tasks
+                    "token_type": res_data.get("token_type", "Bearer"),
+                    "expires_in": res_data.get("expires_in"),
+                }
+
+            elif provider == "discord":
+                token_res = requests.post(
+                    "https://discord.com/api/oauth2/token",
+                    data={
+                        "client_id": config("DISCORD_CLIENT_ID"),
+                        "client_secret": config("DISCORD_CLIENT_SECRET"),
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=10,
+                )
+                if not token_res.ok:
+                    return Response(
+                        {"error": "Discord token exchange failed"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                res_data = token_res.json()
+                credential_data = {
+                    "access_token": res_data.get("access_token"),
+                    "refresh_token": res_data.get("refresh_token"),
+                    "token_type": res_data.get("token_type", "Bearer"),
+                    "expires_in": res_data.get("expires_in"),
+                }
+
+            else:
+                return Response(
+                    {"error": "Unsupported integration provider"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Store the tokens in the Vault (automatically encrypted by EncryptedJSONField)
+            if credential_data.get("access_token"):
+                Credential.objects.update_or_create(
+                    owner=request.user,
+                    service=provider,
+                    defaults={"data": credential_data},
+                )
+                return Response({"status": "success"})
+            else:
+                return Response(
+                    {"error": "Token response did not contain an access_token"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        except requests.RequestException as e:
+            return Response(
+                {"error": f"Network error during token exchange: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class TaskUsageView(APIView):

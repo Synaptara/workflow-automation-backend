@@ -17,6 +17,7 @@ def register(key):
 from . import (
     discord,
     email,
+    github,
     google_sheets,
     groq_ai,
     http_request,
