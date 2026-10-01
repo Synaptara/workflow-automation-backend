@@ -265,3 +265,46 @@ def poll_external_triggers():
 
         except Exception as exc:
             logger.error("Polling failed for workflow %s: %s", workflow.id, exc)
+
+
+@shared_task
+def route_ingested_event(source, payload):
+    """
+    Background worker that routes ingested payloads to matching workflows.
+    Runs entirely outside the web thread to prevent server blocks during traffic spikes.
+    """
+    # Determine the Routing Key based on the source platform
+    routing_key = ""
+
+    if source == "discord":
+        # We route Discord messages based on the channel they were sent in
+        routing_key = payload.get("channel_id", "")
+    elif source == "github":
+        # We might route GitHub events by repository name
+        routing_key = payload.get("repository", {}).get("full_name", "")
+
+    # High-speed DB lookup: Find workflows where the root trigger matches the source AND the routing key
+    trigger_steps = WorkflowStep.objects.filter(
+        workflow__is_active=True,
+        parent__isnull=True,
+        step_type="trigger",
+        action_key=source,  # e.g., 'discord'
+        app_event=routing_key,  # e.g., '10842039485093' (the channel ID)
+    ).select_related("workflow")
+
+    # Spawn a workflow run for every matched user
+    for step in trigger_steps:
+        # Check if the user has reached their task limit before executing
+        usage = TaskUsage.objects.filter(user=step.workflow.owner).first()
+        if usage and usage.limit > 0 and usage.count >= usage.limit:
+            logger.warning(
+                f"Workflow {step.workflow.id} skipped: User {step.workflow.owner.username} hit task limit."
+            )
+            continue
+
+        run = WorkflowRun.objects.create(
+            workflow=step.workflow, trigger_payload=payload
+        )
+
+        # Throw it to your existing execution engine!
+        run_workflow.delay(str(run.id))

@@ -85,9 +85,12 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ],
     "DEFAULT_THROTTLE_RATES": {
-        # applies to the public webhook trigger endpoint only (ScopedRateThrottle,
-        # throttle_scope="webhook" on WebhookTriggerView) — keyed by client IP
+        "anon": "5/minute",  # Stops credential stuffing and OTP spam
         "webhook": "60/minute",
     },
 }
@@ -99,7 +102,7 @@ SIMPLE_JWT = {
 
 CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS").split(",")
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOW_CREDENTIALS = False  # we use JWT bearer tokens, not cookies
+CORS_ALLOW_CREDENTIALS = True  # we use JWT bearer tokens, not cookies
 
 AUTH_PASSWORD_VALIDATORS = [
     {

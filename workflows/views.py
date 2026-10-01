@@ -1,3 +1,4 @@
+import hashlib
 import json
 import random
 
@@ -9,7 +10,7 @@ from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .condition import OPERATORS
@@ -35,6 +36,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [AnonRateThrottle]
 
     def create(self, request, *args, **kwargs):
         email = request.data.get("email")
@@ -175,15 +177,24 @@ class SocialAuthView(APIView):
 
             user = User.objects.create_user(username=username, email=email)
 
-        # 4. Generate tokens for the unified account
         refresh = RefreshToken.for_user(user)
-        return Response(
+        response = Response(
             {
-                "refresh": str(refresh),
                 "access": str(refresh.access_token),
                 "username": user.username,
             }
         )
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,  # (Note: keep this as str(refresh) in SocialAuthView)
+            max_age=7 * 24 * 60 * 60,
+            httponly=True,
+            secure=not settings.DEBUG,  # Enforces HTTPS in production
+            samesite="None"
+            if not settings.DEBUG
+            else "Lax",  # Cross-domain in prod, local-friendly in dev
+        )
+        return response
 
 
 def _validate_step(s):
@@ -642,6 +653,7 @@ class WebhookTriggerView(APIView):
 
 class SendOTPView(APIView):
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [AnonRateThrottle]
 
     def post(self, request):
         email = request.data.get("email")
@@ -671,3 +683,115 @@ class SendOTPView(APIView):
             fail_silently=False,
         )
         return Response({"status": "OTP sent successfully"})
+
+
+class UniversalIngressView(APIView):
+    """
+    The central ingestion funnel for all high-volume external events (Discord, Slack, etc.).
+    Handles deduplication and drops payloads directly into the Celery Queue.
+    """
+
+    permission_classes = [
+        permissions.AllowAny
+    ]  # Protected by your internal architecture/Discord Bot
+
+    def post(self, request, source):
+        payload = request.data
+
+        # 1. Deduplication Engine: Extract a unique ID
+        # (e.g., Discord sends a unique message 'id', Webhooks might send 'event_id')
+        event_id = payload.get("id") or payload.get("event_id")
+
+        # Fallback: If the source doesn't provide a unique ID, hash the payload
+        if not event_id:
+            payload_str = json.dumps(payload, sort_keys=True).encode("utf-8")
+            event_id = hashlib.sha256(payload_str).hexdigest()
+
+        # 2. Redis Deduplication Check
+        cache_key = f"ingress_{source}_{event_id}"
+        if cache.get(cache_key):
+            return Response(
+                {"status": "ignored", "reason": "duplicate"}, status=status.HTTP_200_OK
+            )
+
+        # Set lock in Redis for 10 minutes to prevent duplicate processing
+        cache.set(cache_key, True, timeout=600)
+
+        # 3. Async Queueing: Drop into Celery immediately
+        from .tasks import route_ingested_event
+
+        route_ingested_event.delay(source, payload)
+
+        return Response(
+            {"status": "queued", "event_id": event_id}, status=status.HTTP_202_ACCEPTED
+        )
+
+
+from django.conf import settings
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
+
+class SecureLoginView(TokenObtainPairView):
+    throttle_classes = [AnonRateThrottle]
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        refresh_token = response.data.get("refresh")
+
+        if refresh_token:
+            # Remove refresh token from the JSON body
+            del response.data["refresh"]
+
+            # Set it as a secure HttpOnly cookie
+            response.set_cookie(
+                key="refresh_token",
+                value=refresh_token,
+                max_age=7 * 24 * 60 * 60,  # 7 days
+                httponly=True,
+                secure=not settings.DEBUG,  # Secure (HTTPS) in production
+                samesite="Lax",
+            )
+        return response
+
+
+class SecureRefreshView(TokenRefreshView):
+    def post(self, request, *args, **kwargs):
+        # 1. Grab the token securely from the cookie
+        refresh_token = request.COOKIES.get("refresh_token")
+
+        if not refresh_token:
+            return Response(
+                {"detail": "Refresh cookie missing."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # 2. Feed it directly into the serializer (Bypasses immutable request.data!)
+        serializer = self.get_serializer(data={"refresh": refresh_token})
+
+        try:
+            serializer.is_valid(raise_exception=True)
+        except Exception:
+            return Response(
+                {"detail": "Refresh token expired or invalid."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # 3. Create the response with the new access token
+        response = Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+        # 4. If token rotation gives us a new refresh token, update the cookie
+        new_refresh = serializer.validated_data.get("refresh")
+        if new_refresh:
+            if "refresh" in response.data:
+                del response.data["refresh"]  # Scrub it from the JSON body
+
+            response.set_cookie(
+                key="refresh_token",
+                value=new_refresh,
+                max_age=7 * 24 * 60 * 60,
+                httponly=True,
+                secure=not settings.DEBUG,
+                samesite="None" if not settings.DEBUG else "Lax",
+            )
+
+        return response
