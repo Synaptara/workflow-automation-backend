@@ -1,8 +1,13 @@
 import json
+import random
 
+from django.conf import settings
+from django.core.cache import cache
+from django.core.mail import send_mail
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -30,6 +35,31 @@ from rest_framework_simplejwt.tokens import RefreshToken
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        email = request.data.get("email")
+        submitted_otp = request.data.get("otp")
+
+        if not submitted_otp:
+            return Response(
+                {"error": "OTP is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        cached_otp = cache.get(f"otp_{email}")
+        if not cached_otp or cached_otp != submitted_otp:
+            return Response(
+                {"error": "Invalid or expired OTP"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # OTP is valid, clear it from cache and proceed with registration
+        cache.delete(f"otp_{email}")
+        response = super().create(request, *args, **kwargs)
+
+        # Ensure TaskUsage profile is created and set to free
+        user = User.objects.get(email=email)
+        TaskUsage.objects.get_or_create(user=user, defaults={"plan_type": "free"})
+
+        return response
 
 
 class SocialAuthView(APIView):
@@ -182,6 +212,15 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         return Workflow.objects.filter(owner=self.request.user)
 
     def perform_create(self, serializer):
+        # 2-Workflow limit logic for Free Tier
+        workflow_count = Workflow.objects.filter(owner=self.request.user).count()
+        usage, _ = TaskUsage.objects.get_or_create(user=self.request.user)
+
+        if usage.plan_type == "free" and workflow_count >= 2:
+            raise PermissionDenied(
+                "Free plan limit reached. Please upgrade to create more than 2 workflows."
+            )
+
         serializer.save(owner=self.request.user)
 
     @action(detail=True, methods=["put"], url_path="steps")
@@ -521,17 +560,35 @@ class IntegrationOAuthView(APIView):
 
 
 class TaskUsageView(APIView):
-    """Returns the user's current billing/task usage metrics."""
+    """Returns the user's current billing, task usage metrics, and workflow limits."""
 
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        # Get or create the usage profile (defaults to "free" plan)
         usage, _ = TaskUsage.objects.get_or_create(user=request.user)
+
+        # Count how many workflows the user currently has
+        workflow_count = request.user.workflows.count()
+
+        # Calculate task percentage safely
         percent = (
             min(100, int((usage.count / usage.limit) * 100)) if usage.limit > 0 else 0
         )
+
+        # Determine workflow limit based on plan
+        plan_type = getattr(usage, "plan_type", "free").lower()
+        workflow_limit = 2 if plan_type == "free" else "Unlimited"
+
         return Response(
-            {"count": usage.count, "limit": usage.limit, "percentage": percent}
+            {
+                "plan": plan_type.capitalize(),
+                "task_count": usage.count,
+                "task_limit": usage.limit,
+                "task_percentage": percent,
+                "workflow_count": workflow_count,
+                "workflow_limit": workflow_limit,
+            }
         )
 
 
@@ -565,3 +622,36 @@ class WebhookTriggerView(APIView):
         )
         run_workflow.delay(str(run.id))
         return Response({"run_id": str(run.id)}, status=status.HTTP_202_ACCEPTED)
+
+
+class SendOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = request.data.get("email")
+        if not email:
+            return Response(
+                {"error": "Email is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(email=email).exists():
+            return Response(
+                {"error": "Email already registered"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        otp = str(random.randint(100000, 999999))
+
+        # Store OTP in Redis for 10 minutes
+        cache.set(f"otp_{email}", otp, timeout=600)
+
+        # Send Email
+        send_mail(
+            "Verify your Orkflo account",
+            f"Your verification code is: {otp}. It expires in 10 minutes.",
+            settings.DEFAULT_FROM_EMAIL,
+            [email],
+            fail_silently=False,
+        )
+        return Response({"status": "OTP sent successfully"})

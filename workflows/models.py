@@ -47,6 +47,7 @@ class TaskUsage(models.Model):
     user = models.OneToOneField(
         User, on_delete=models.CASCADE, related_name="task_usage"
     )
+    plan_type = models.CharField(max_length=20, default="free")
     count = models.PositiveIntegerField(default=0)
     limit = models.PositiveIntegerField(default=1000)  # Default free tier limit
 

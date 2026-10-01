@@ -7,6 +7,7 @@ from .views import (
     GlobalRunHistoryView,
     IntegrationOAuthView,
     RegisterView,
+    SendOTPView,
     SocialAuthView,
     TaskUsageView,
     WebhookTriggerView,
@@ -25,5 +26,6 @@ urlpatterns = [
     path("credentials/oauth/<str:provider>/", IntegrationOAuthView.as_view()),
     path("hooks/<uuid:workflow_id>/<str:secret>/", WebhookTriggerView.as_view()),
     path("runs/history/", GlobalRunHistoryView.as_view()),
+    path("auth/send-otp/", SendOTPView.as_view(), name="send-otp"),
     path("usage/", TaskUsageView.as_view()),
 ] + router.urls
