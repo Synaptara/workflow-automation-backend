@@ -186,7 +186,7 @@ class SocialAuthView(APIView):
         )
         response.set_cookie(
             key="refresh_token",
-            value=refresh_token,  # (Note: keep this as str(refresh) in SocialAuthView)
+            value=str(refresh),  # (Note: keep this as str(refresh) in SocialAuthView)
             max_age=7 * 24 * 60 * 60,
             httponly=True,
             secure=not settings.DEBUG,  # Enforces HTTPS in production
