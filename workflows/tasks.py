@@ -13,7 +13,14 @@ from . import executors  # noqa: F401
 from .condition import _resolve, evaluate_condition
 from .executors import EXECUTOR_REGISTRY
 from .executors.trello import poll_trello_new_cards
-from .models import StepRun, TaskUsage, TriggerState, Workflow, WorkflowRun
+from .models import (
+    StepRun,
+    TaskUsage,
+    TriggerState,
+    Workflow,
+    WorkflowRun,
+    WorkflowStep,
+)
 
 logger = logging.getLogger(__name__)
 
