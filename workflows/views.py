@@ -73,7 +73,7 @@ class SocialAuthView(APIView):
             )
 
         email = None
-        username = None
+        is_verified = False
         frontend_url = config("FRONTEND_URL", default="http://localhost:5173")
 
         if provider == "google":
@@ -103,7 +103,8 @@ class SocialAuthView(APIView):
             )
             user_data = user_res.json()
             email = user_data.get("email")
-            username = email.split("@")[0] if email else None
+            # Google's v2 endpoint uses 'verified_email' (boolean)
+            is_verified = user_data.get("verified_email", False)
 
         elif provider == "github":
             token_res = requests.post(
@@ -125,25 +126,19 @@ class SocialAuthView(APIView):
 
             access_token = token_res.json().get("access_token")
 
-            user_res = requests.get(
-                "https://api.github.com/user",
+            # Check GitHub /user/emails endpoint to enforce verification status
+            email_res = requests.get(
+                "https://api.github.com/user/emails",
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10,
             )
-            user_data = user_res.json()
-            username = user_data.get("login")
-            email = user_data.get("email")
+            emails = email_res.json()
+            primary_email = next((e for e in emails if e.get("primary")), None)
 
-            if not email:
-                email_res = requests.get(
-                    "https://api.github.com/user/emails",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=10,
-                )
-                emails = email_res.json()
-                primary_email = next((e for e in emails if e.get("primary")), None)
-                if primary_email:
-                    email = primary_email.get("email")
+            if primary_email:
+                email = primary_email.get("email")
+                # GitHub explicitly provides a 'verified' boolean per email
+                is_verified = primary_email.get("verified", False)
 
         else:
             return Response(
@@ -156,16 +151,31 @@ class SocialAuthView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Secure User Matching Logic
-        # Strict Provider Isolation Logic
-        # This forces google_user@email.com and github_user@email.com to be two totally separate accounts.
-        provider_username = f"{provider}_{email}"
+        # 1. Block unverified emails to prevent Account Takeover (ATO)
+        if not is_verified:
+            return Response(
+                {
+                    "error": "Unverified email addresses cannot be used for secure login."
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-        user = User.objects.filter(username=provider_username).first()
+        # 2. Industry Standard Verified Auto-Linking
+        user = User.objects.filter(email=email).first()
 
         if not user:
-            user = User.objects.create_user(username=provider_username, email=email)
+            # 3. Clean Username Generation & Collision Handling
+            base_username = email.split("@")[0]
+            username = base_username
+            counter = 1
 
+            while User.objects.filter(username=username).exists():
+                username = f"{base_username}{counter}"
+                counter += 1
+
+            user = User.objects.create_user(username=username, email=email)
+
+        # 4. Generate tokens for the unified account
         refresh = RefreshToken.for_user(user)
         return Response(
             {
