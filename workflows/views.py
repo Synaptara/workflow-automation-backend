@@ -171,6 +171,7 @@ class SocialAuthView(APIView):
             {
                 "refresh": str(refresh),
                 "access": str(refresh.access_token),
+                "username": user.username,
             }
         )
 
@@ -583,6 +584,11 @@ class TaskUsageView(APIView):
         return Response(
             {
                 "plan": plan_type.capitalize(),
+                # Keys for Sidebar.jsx
+                "count": usage.count,
+                "limit": usage.limit,
+                "percentage": percent,
+                # Keys for Billing.jsx
                 "task_count": usage.count,
                 "task_limit": usage.limit,
                 "task_percentage": percent,
