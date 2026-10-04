@@ -7,6 +7,9 @@ from cryptography.fernet import Fernet
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models
+from django.db.models.signals import post_delete, post_save
+from django.dispatch import receiver
+from django_celery_beat.models import IntervalSchedule, PeriodicTask
 
 # Generate a reliable 32-byte Fernet key from Django's SECRET_KEY
 _key = base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest())
@@ -148,3 +151,53 @@ class TriggerState(models.Model):
 
     def __str__(self):
         return f"State: {self.workflow.name} ({self.last_seen_id})"
+
+
+@receiver(post_save, sender=WorkflowStep)
+def update_step_schedule(sender, instance, created, **kwargs):
+    """Hooks into the Step save event. If it's a schedule, update the Celery clock."""
+    if instance.step_type == "trigger" and instance.action_key == "schedule":
+        task_name = f"workflow_schedule_{instance.workflow.id}"
+
+        # If the parent workflow is active, schedule it
+        if instance.workflow.is_active:
+            # Extract the interval from your EncryptedJSONField config (default to 1 min)
+            config_data = instance.config if isinstance(instance.config, dict) else {}
+            minutes = int(config_data.get("Interval (Minutes)", 1))
+
+            # Create or fetch the time interval in the database
+            schedule, _ = IntervalSchedule.objects.get_or_create(
+                every=minutes, period=IntervalSchedule.MINUTES
+            )
+
+            # Upsert the periodic task in the Celery clock
+            PeriodicTask.objects.update_or_create(
+                name=task_name,
+                defaults={
+                    "interval": schedule,
+                    "task": "workflows.tasks.trigger_scheduled_workflow",
+                    "args": json.dumps([str(instance.workflow.id)]),
+                    "enabled": True,
+                },
+            )
+        else:
+            # If the workflow was paused, disable the clock tick
+            PeriodicTask.objects.filter(name=task_name).update(enabled=False)
+
+
+@receiver(post_delete, sender=WorkflowStep)
+def delete_step_schedule(sender, instance, **kwargs):
+    """If the user deletes the Schedule node from the canvas, destroy the cron job."""
+    if instance.step_type == "trigger" and instance.action_key == "schedule":
+        task_name = f"workflow_schedule_{instance.workflow.id}"
+        PeriodicTask.objects.filter(name=task_name).delete()
+
+
+@receiver(post_save, sender=Workflow)
+def toggle_workflow_schedule(sender, instance, **kwargs):
+    """If the user toggles the master 'Active' switch on the workflow, pause/resume the clock."""
+    task_name = f"workflow_schedule_{instance.id}"
+    if not instance.is_active:
+        PeriodicTask.objects.filter(name=task_name).update(enabled=False)
+    else:
+        PeriodicTask.objects.filter(name=task_name).update(enabled=True)
