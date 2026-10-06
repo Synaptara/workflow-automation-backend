@@ -280,31 +280,31 @@ def route_ingested_event(source, payload):
     Background worker that routes ingested payloads to matching workflows.
     Runs entirely outside the web thread to prevent server blocks during traffic spikes.
     """
-    # Base query for all incoming webhooks
-    query_kwargs = {
-        "workflow__is_active": True,
-        "parent__isnull": True,
-        "step_type": "trigger",
-        "action_key": source,
-    }
+    # 1. Fetch all active triggers for this platform (Bypassing Postgres JSON limits)
+    trigger_steps = WorkflowStep.objects.filter(
+        workflow__is_active=True,
+        parent__isnull=True,
+        step_type="trigger",
+        action_key=source,
+    ).select_related("workflow")
 
-    # Dynamically target the correct JSON configuration field based on the platform
-    if source == "discord":
-        # Search inside the JSON config for {"channel_id": "123456789"}
-        query_kwargs["config__channel_id"] = payload.get("channel_id", "")
-    elif source == "github":
-        query_kwargs["config__repository"] = payload.get("repository", {}).get(
-            "full_name", ""
-        )
-
-    # High-speed DB lookup using Postgres JSON queries
-    trigger_steps = WorkflowStep.objects.filter(**query_kwargs).select_related(
-        "workflow"
-    )
-
-    # Spawn a workflow run for every matched user
     for step in trigger_steps:
-        # Check if the user has reached their task limit before executing
+        # 2. Memory-Side Evaluation
+        # Accessing `step.config` here automatically decrypts the JSON field in Python,
+        # keeping your data 100% encrypted at rest in the database.
+        config = step.config or {}
+
+        if source == "discord":
+            if config.get("channel_id") != payload.get("channel_id"):
+                continue  # Skip if it doesn't match the required channel
+
+        elif source == "github":
+            if config.get("repository") != payload.get("repository", {}).get(
+                "full_name"
+            ):
+                continue
+
+        # 3. Check if the user has reached their task limit before executing
         usage = TaskUsage.objects.filter(user=step.workflow.owner).first()
         if usage and usage.limit > 0 and usage.count >= usage.limit:
             logger.warning(
@@ -312,9 +312,9 @@ def route_ingested_event(source, payload):
             )
             continue
 
+        # 4. Spawn the workflow run
         run = WorkflowRun.objects.create(
             workflow=step.workflow, trigger_payload=payload
         )
 
-        # Throw it to your existing execution engine!
         run_workflow.delay(str(run.id))
