@@ -131,18 +131,35 @@ class DiscordExecutor(BaseExecutor):
         elif event == "create_channel":
             guild_id = step_config.get("guild_id")
             channel_name = step_config.get("channel_name")
+            private_user_id = step_config.get("private_user_id")
+
             if not guild_id or not channel_name:
                 raise ValueError(
                     "Discord create_channel requires both 'guild_id' and 'channel_name'."
                 )
 
-            channel_type = int(
-                step_config.get("channel_type", 0)
-            )  # 0 = GUILD_TEXT, 2 = GUILD_VOICE
+            channel_type = int(step_config.get("channel_type", 0))  # 0 = GUILD_TEXT
             payload = {
                 "name": str(channel_name).strip().replace(" ", "-").lower(),
                 "type": channel_type,
             }
+
+            # Inject Private Permissions if a user ID is mapped
+            if private_user_id:
+                payload["permission_overwrites"] = [
+                    {
+                        "id": str(
+                            guild_id
+                        ),  # The @everyone role shares the exact ID of the Guild
+                        "type": 0,  # 0 = role
+                        "deny": "1024",  # Deny VIEW_CHANNEL (0x400)
+                    },
+                    {
+                        "id": str(private_user_id),
+                        "type": 1,  # 1 = member
+                        "allow": "1024",  # Allow VIEW_CHANNEL (0x400)
+                    },
+                ]
 
             res = self._send_request(
                 "POST", f"/guilds/{guild_id}/channels", token, payload
@@ -152,6 +169,7 @@ class DiscordExecutor(BaseExecutor):
                 "channel_id": res.get("id"),
                 "channel_name": res.get("name"),
                 "guild_id": res.get("guild_id"),
+                "is_private": bool(private_user_id),
             }
 
         elif event == "add_role":
