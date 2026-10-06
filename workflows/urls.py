@@ -12,6 +12,7 @@ from .views import (
     SendOTPView,
     SocialAuthView,
     TaskUsageView,
+    TestTriggerView,
     UniversalIngressView,
     WebhookTriggerView,
     WorkflowViewSet,
@@ -37,4 +38,5 @@ urlpatterns = [
     path("runs/history/", GlobalRunHistoryView.as_view()),
     path("auth/send-otp/", SendOTPView.as_view(), name="send-otp"),
     path("usage/", TaskUsageView.as_view()),
+    path("test-trigger/", TestTriggerView.as_view(), name="test-trigger"),
 ] + router.urls

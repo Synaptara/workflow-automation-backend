@@ -795,3 +795,53 @@ class SecureRefreshView(TokenRefreshView):
             )
 
         return response
+
+
+class TestTriggerView(APIView):
+    """
+    Live Data Fetcher for the Workflow Builder.
+    Dynamically routes to the correct integration to fetch recent test data,
+    using the user's encrypted Vault credentials.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        action_key = request.data.get("action_key")
+        app_event = request.data.get("app_event")
+        config = request.data.get("config", {})
+
+        if not action_key or not app_event:
+            return Response(
+                {"error": "Missing action_key or app_event"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if action_key not in EXECUTOR_REGISTRY:
+            return Response(
+                {"error": f"Unsupported integration: {action_key}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Retrieve the user's encrypted credentials from the Vault
+        vault_creds = Credential.objects.filter(
+            owner=request.user, service=action_key
+        ).first()
+        if vault_creds:
+            # Inject the credentials into the config so the executor can authenticate
+            config.update(vault_creds.data)
+
+        executor = EXECUTOR_REGISTRY[action_key]()
+
+        try:
+            # We call a special 'fetch_test_data' method on the executor
+            test_data = executor.fetch_test_data(app_event, config)
+            return Response(test_data, status=status.HTTP_200_OK)
+
+        except NotImplementedError:
+            return Response(
+                {"error": "Live fetching is not yet supported for this integration."},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

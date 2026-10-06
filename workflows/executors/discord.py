@@ -212,3 +212,39 @@ class DiscordExecutor(BaseExecutor):
 
         else:
             raise ValueError(f"Unsupported Discord action event: {app_event}")
+
+    def fetch_test_data(
+        self, app_event: str, step_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Fetches live data from Discord for the UI to use as variables.
+        """
+        token = self._resolve_token(step_config)
+
+        if app_event == "member_join":
+            guild_id = step_config.get("guild_id")
+            if not guild_id:
+                raise ValueError("Server (Guild) ID is required to fetch members.")
+
+            # Fetch the most recent member from the guild
+            res = self._send_request(
+                "GET", f"/guilds/{guild_id}/members?limit=1", token
+            )
+            if not res or not isinstance(res, list) or len(res) == 0:
+                raise ValueError("No members found in this server.")
+
+            member = res[0]
+            user = member.get("user", {})
+            return {
+                "event_type": "member_join",
+                "author_id": user.get("id"),
+                "author_name": user.get("username"),
+                "guild_id": guild_id,
+                "created_at": member.get("joined_at"),
+            }
+
+        elif app_event == "new_message":
+            # Similar logic to fetch the latest message from a channel
+            raise NotImplementedError("Fetching recent messages is coming soon.")
+
+        raise ValueError(f"Cannot fetch test data for event: {app_event}")
