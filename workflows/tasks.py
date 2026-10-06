@@ -277,44 +277,78 @@ def poll_external_triggers():
 @shared_task
 def route_ingested_event(source, payload):
     """
-    Background worker that routes ingested payloads to matching workflows.
-    Runs entirely outside the web thread to prevent server blocks during traffic spikes.
+    Asynchronous event router for high-volume platform webhooks and ingress listeners.
+    Evaluates trigger event criteria against memory-decrypted configs.
     """
-    # 1. Fetch all active triggers for this platform (Bypassing Postgres JSON limits)
+    event_type = payload.get("event_type", "new_message")
+
     trigger_steps = WorkflowStep.objects.filter(
         workflow__is_active=True,
         parent__isnull=True,
         step_type="trigger",
         action_key=source,
-    ).select_related("workflow")
+    ).select_related("workflow", "workflow__owner")
 
     for step in trigger_steps:
-        # 2. Memory-Side Evaluation
-        # Accessing `step.config` here automatically decrypts the JSON field in Python,
-        # keeping your data 100% encrypted at rest in the database.
         config = step.config or {}
 
         if source == "discord":
-            if config.get("channel_id") != payload.get("channel_id"):
-                continue  # Skip if it doesn't match the required channel
-
-        elif source == "github":
-            if config.get("repository") != payload.get("repository", {}).get(
-                "full_name"
-            ):
+            # Match step event type (fallback to 'new_message' for legacy steps)
+            target_event = (step.app_event or "new_message").lower()
+            if target_event != event_type:
                 continue
 
-        # 3. Check if the user has reached their task limit before executing
+            # Event 1: New Message
+            if event_type == "new_message":
+                target_channel = str(config.get("channel_id", "")).strip()
+                incoming_channel = str(payload.get("channel_id", "")).strip()
+                if target_channel and target_channel != incoming_channel:
+                    continue
+
+                target_guild = str(config.get("guild_id", "")).strip()
+                incoming_guild = str(payload.get("guild_id", "")).strip()
+                if target_guild and target_guild != incoming_guild:
+                    continue
+
+            # Event 2: User Joins Server
+            elif event_type == "member_join":
+                target_guild = str(config.get("guild_id", "")).strip()
+                incoming_guild = str(payload.get("guild_id", "")).strip()
+                if target_guild and target_guild != incoming_guild:
+                    continue
+
+            # Event 3: Reaction Added
+            elif event_type == "reaction_added":
+                target_channel = str(config.get("channel_id", "")).strip()
+                incoming_channel = str(payload.get("channel_id", "")).strip()
+                if target_channel and target_channel != incoming_channel:
+                    continue
+
+                target_emoji = str(config.get("emoji", "")).strip()
+                incoming_emoji = str(payload.get("emoji", "")).strip()
+                if target_emoji and target_emoji != incoming_emoji:
+                    continue
+
+        elif source == "github":
+            repo_filter = config.get("repository", "").strip()
+            incoming_repo = payload.get("repository", {}).get("full_name", "").strip()
+            if repo_filter and repo_filter != incoming_repo:
+                continue
+
+        # Enterprise Task Quota Guard
         usage = TaskUsage.objects.filter(user=step.workflow.owner).first()
         if usage and usage.limit > 0 and usage.count >= usage.limit:
             logger.warning(
-                f"Workflow {step.workflow.id} skipped: User {step.workflow.owner.username} hit task limit."
+                "Execution rejected for workflow %s: User '%s' quota exceeded (%d/%d).",
+                step.workflow.id,
+                step.workflow.owner.username,
+                usage.count,
+                usage.limit,
             )
             continue
 
-        # 4. Spawn the workflow run
         run = WorkflowRun.objects.create(
-            workflow=step.workflow, trigger_payload=payload
+            workflow=step.workflow,
+            trigger_payload=payload,
         )
-
         run_workflow.delay(str(run.id))
