@@ -24,7 +24,8 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(
-        f"🔥 Orkflo Discord Ingress Online | Logged in as {client.user} | Routing to {INGRESS_URL}"
+        f"🔥 Orkflo Discord Ingress Online | Logged in as {client.user} | Routing to {INGRESS_URL}",
+        flush=True,
     )
 
 
@@ -46,18 +47,23 @@ async def on_message(message):
         async with aiohttp.ClientSession() as session:
             async with session.post(INGRESS_URL, json=payload, timeout=2) as response:
                 if response.status == 202:
-                    print(f"✅ Routed msg {message.id} to Celery queue")
+                    print(f"✅ Routed msg {message.id} to Celery queue", flush=True)
                 else:
                     text = await response.text()
-                    print(f"❌ Ingress rejected: {response.status} - {text}")
+                    print(
+                        f"❌ Ingress rejected: {response.status} - {text}", flush=True
+                    )
     except asyncio.TimeoutError:
-        print(f"⚠️ Handoff timeout: Django took too long to acknowledge {message.id}")
+        print(
+            f"⚠️ Handoff timeout: Django took too long to acknowledge {message.id}",
+            flush=True,
+        )
     except Exception as e:
-        print(f"⚠️ Handoff failed: {e}")
+        print(f"⚠️ Handoff failed: {e}", flush=True)
 
 
 if __name__ == "__main__":
     if not TOKEN:
-        print("FATAL: DISCORD_BOT_TOKEN missing from local .env")
+        print("FATAL: DISCORD_BOT_TOKEN missing from local .env", flush=True)
     else:
         client.run(TOKEN)
