@@ -280,24 +280,27 @@ def route_ingested_event(source, payload):
     Background worker that routes ingested payloads to matching workflows.
     Runs entirely outside the web thread to prevent server blocks during traffic spikes.
     """
-    # Determine the Routing Key based on the source platform
-    routing_key = ""
+    # Base query for all incoming webhooks
+    query_kwargs = {
+        "workflow__is_active": True,
+        "parent__isnull": True,
+        "step_type": "trigger",
+        "action_key": source,
+    }
 
+    # Dynamically target the correct JSON configuration field based on the platform
     if source == "discord":
-        # We route Discord messages based on the channel they were sent in
-        routing_key = payload.get("channel_id", "")
+        # Search inside the JSON config for {"channel_id": "123456789"}
+        query_kwargs["config__channel_id"] = payload.get("channel_id", "")
     elif source == "github":
-        # We might route GitHub events by repository name
-        routing_key = payload.get("repository", {}).get("full_name", "")
+        query_kwargs["config__repository"] = payload.get("repository", {}).get(
+            "full_name", ""
+        )
 
-    # High-speed DB lookup: Find workflows where the root trigger matches the source AND the routing key
-    trigger_steps = WorkflowStep.objects.filter(
-        workflow__is_active=True,
-        parent__isnull=True,
-        step_type="trigger",
-        action_key=source,  # e.g., 'discord'
-        app_event=routing_key,  # e.g., '10842039485093' (the channel ID)
-    ).select_related("workflow")
+    # High-speed DB lookup using Postgres JSON queries
+    trigger_steps = WorkflowStep.objects.filter(**query_kwargs).select_related(
+        "workflow"
+    )
 
     # Spawn a workflow run for every matched user
     for step in trigger_steps:

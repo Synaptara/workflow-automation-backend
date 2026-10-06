@@ -9,8 +9,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-# Routing to your local Django server
-INGRESS_URL = "http://127.0.0.1:8000/api/ingress/discord/"
+
+# Dynamically pull the backend URL (e.g., https://orkflo-api.duckdns.org)
+# Falls back to localhost for local testing
+BASE_URL = os.getenv("VITE_API_URL", "http://127.0.0.1:8000")
+INGRESS_URL = f"{BASE_URL.rstrip('/')}/api/ingress/discord/"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -20,7 +23,9 @@ client = discord.Client(intents=intents)
 
 @client.event
 async def on_ready():
-    print(f"🔥 Orkflo Discord Ingress Online | Logged in as {client.user}")
+    print(
+        f"🔥 Orkflo Discord Ingress Online | Logged in as {client.user} | Routing to {INGRESS_URL}"
+    )
 
 
 @client.event
