@@ -272,3 +272,40 @@ class DiscordExecutor(BaseExecutor):
             }
 
         raise ValueError(f"Cannot fetch test data for event: {app_event}")
+
+    def match_ingress_event(
+        self, app_event: str, event_type: str, payload: dict, step_config: dict
+    ) -> bool:
+        target_event = (app_event or "new_message").lower()
+        if target_event != event_type:
+            return False
+
+        if event_type == "new_message":
+            target_channel = str(step_config.get("channel_id", "")).strip()
+            incoming_channel = str(payload.get("channel_id", "")).strip()
+            if target_channel and target_channel != incoming_channel:
+                return False
+
+            target_guild = str(step_config.get("guild_id", "")).strip()
+            incoming_guild = str(payload.get("guild_id", "")).strip()
+            if target_guild and target_guild != incoming_guild:
+                return False
+
+        elif event_type == "member_join":
+            target_guild = str(step_config.get("guild_id", "")).strip()
+            incoming_guild = str(payload.get("guild_id", "")).strip()
+            if target_guild and target_guild != incoming_guild:
+                return False
+
+        elif event_type == "reaction_added":
+            target_channel = str(step_config.get("channel_id", "")).strip()
+            incoming_channel = str(payload.get("channel_id", "")).strip()
+            if target_channel and target_channel != incoming_channel:
+                return False
+
+            target_emoji = str(step_config.get("emoji", "")).strip()
+            incoming_emoji = str(payload.get("emoji", "")).strip()
+            if target_emoji and target_emoji != incoming_emoji:
+                return False
+
+        return True

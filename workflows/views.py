@@ -308,10 +308,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                         obj.step_type == "trigger"
                         and obj.action_key in EXECUTOR_REGISTRY
                     ):
-                        # CRITICAL FIX: Removed the () instantiation here.
-                        executor_instance = EXECUTOR_REGISTRY[obj.action_key]
+                        # Fetch the instance directly
+                        executor = EXECUTOR_REGISTRY[obj.action_key]
 
-                        if hasattr(executor_instance, "register_webhook"):
+                        if hasattr(executor, "register_webhook"):
                             vault_creds = Credential.objects.filter(
                                 owner=request.user, service=obj.action_key
                             ).first()
@@ -327,37 +327,10 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                             ).rstrip("/")
                             webhook_url = f"{backend_url}/api/webhooks/{workflow.id}/{workflow.webhook_secret}/"
 
-                            # This will raise a ValueError if it fails, which breaks the transaction atomic block
-                            # and safely rolls back the database.
-                            executor_instance.register_webhook(
+                            executor.register_webhook(
                                 obj.app_event, step_config, webhook_url
                             )
                 # --- END WEBHOOK REGISTRATION BLOCK ---
-
-                has_schedule = False
-                for s, obj in created:
-                    if obj.step_type == "trigger" and obj.action_key == "schedule":
-                        has_schedule = True
-                        interval_minutes = int(obj.config.get("interval", 15))
-                        schedule, _ = IntervalSchedule.objects.get_or_create(
-                            every=interval_minutes,
-                            period=IntervalSchedule.MINUTES,
-                        )
-                        PeriodicTask.objects.update_or_create(
-                            name=f"workflow-schedule-{workflow.id}",
-                            defaults={
-                                "interval": schedule,
-                                "task": "workflows.tasks.trigger_scheduled_workflow",
-                                "args": json.dumps([str(workflow.id)]),
-                                "enabled": workflow.is_active,
-                            },
-                        )
-                        break
-
-                if not has_schedule:
-                    PeriodicTask.objects.filter(
-                        name=f"workflow-schedule-{workflow.id}"
-                    ).delete()
 
         except ValueError as e:
             # Catch the webhook registration failure and send it to the frontend

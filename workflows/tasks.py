@@ -74,7 +74,11 @@ def _run_action_step(run, step, context, max_attempts=3):
         {"step_id": str(step.id), "action_key": step.action_key},
     )
 
+    # Fetch the instance directly
     executor = EXECUTOR_REGISTRY.get(step.action_key)
+    if not executor:
+        raise RuntimeError(f"Executor {step.action_key} not found in registry.")
+
     last_exc = None
 
     # Retrieve stored credentials if they exist
@@ -321,7 +325,7 @@ def poll_external_triggers():
 def route_ingested_event(source, payload):
     """
     Asynchronous event router for high-volume platform webhooks and ingress listeners.
-    Evaluates trigger event criteria against memory-decrypted configs.
+    Evaluates trigger event criteria against memory-decrypted configs using Executor delegates.
     """
     event_type = payload.get("event_type", "new_message")
 
@@ -335,50 +339,15 @@ def route_ingested_event(source, payload):
     for step in trigger_steps:
         config = step.config or {}
 
-        if source == "discord":
-            # Match step event type (fallback to 'new_message' for legacy steps)
-            target_event = (step.app_event or "new_message").lower()
-            if target_event != event_type:
-                continue
-
-            # Event 1: New Message
-            if event_type == "new_message":
-                target_channel = str(config.get("channel_id", "")).strip()
-                incoming_channel = str(payload.get("channel_id", "")).strip()
-                if target_channel and target_channel != incoming_channel:
+        # Pull the instance directly from the registry
+        executor = EXECUTOR_REGISTRY.get(source)
+        if executor:
+            if hasattr(executor, "match_ingress_event"):
+                if not executor.match_ingress_event(
+                    step.app_event, event_type, payload, config
+                ):
                     continue
 
-                target_guild = str(config.get("guild_id", "")).strip()
-                incoming_guild = str(payload.get("guild_id", "")).strip()
-                if target_guild and target_guild != incoming_guild:
-                    continue
-
-            # Event 2: User Joins Server
-            elif event_type == "member_join":
-                target_guild = str(config.get("guild_id", "")).strip()
-                incoming_guild = str(payload.get("guild_id", "")).strip()
-                if target_guild and target_guild != incoming_guild:
-                    continue
-
-            # Event 3: Reaction Added
-            elif event_type == "reaction_added":
-                target_channel = str(config.get("channel_id", "")).strip()
-                incoming_channel = str(payload.get("channel_id", "")).strip()
-                if target_channel and target_channel != incoming_channel:
-                    continue
-
-                target_emoji = str(config.get("emoji", "")).strip()
-                incoming_emoji = str(payload.get("emoji", "")).strip()
-                if target_emoji and target_emoji != incoming_emoji:
-                    continue
-
-        elif source == "github":
-            repo_filter = config.get("repository", "").strip()
-            incoming_repo = payload.get("repository", {}).get("full_name", "").strip()
-            if repo_filter and repo_filter != incoming_repo:
-                continue
-
-        # Enterprise Task Quota Guard
         usage = TaskUsage.objects.filter(user=step.workflow.owner).first()
         if usage and usage.limit > 0 and usage.count >= usage.limit:
             logger.warning(

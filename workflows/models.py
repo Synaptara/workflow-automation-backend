@@ -159,13 +159,10 @@ def update_step_schedule(sender, instance, created, **kwargs):
     if instance.step_type == "trigger" and instance.action_key == "schedule":
         task_name = f"workflow_schedule_{instance.workflow.id}"
 
-        # If the parent workflow is active, schedule it
         if instance.workflow.is_active:
-            # Extract the interval from your EncryptedJSONField config (default to 1 min)
             config_data = instance.config if isinstance(instance.config, dict) else {}
-            minutes = int(config_data.get("Interval (Minutes)", 1))
+            minutes = int(config_data.get("interval", 15))
 
-            # Create or fetch the time interval in the database
             schedule, _ = IntervalSchedule.objects.get_or_create(
                 every=minutes, period=IntervalSchedule.MINUTES
             )
