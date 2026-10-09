@@ -14,6 +14,7 @@ from .condition import _resolve, evaluate_condition
 from .executors import EXECUTOR_REGISTRY
 from .executors.trello import poll_trello_new_cards
 from .models import (
+    Notification,
     StepRun,
     TaskUsage,
     TriggerState,
@@ -194,6 +195,8 @@ def run_workflow(self, run_id):
         step_type="trigger", parent__isnull=True
     ).order_by("order")
 
+    last_error_message = ""
+
     try:
         for trigger_step in root_steps:
             for child in trigger_step.children.order_by("order"):
@@ -201,13 +204,53 @@ def run_workflow(self, run_id):
         run.status = "success"
     except SoftTimeLimitExceeded:
         run.status = "failed"
+        last_error_message = "Workflow timed out after 120 seconds."
         logger.error("Workflow run %s timed out after 120 seconds", run_id)
     except Exception as exc:
         run.status = "failed"
+        last_error_message = str(exc)
         logger.error("Workflow run %s failed: %s", run_id, str(exc))
     finally:
         run.finished_at = timezone.now()
         run.save(update_fields=["status", "finished_at"])
+
+        # --- NEW NOTIFICATION CREATION LOGIC ---
+        workflow_name = run.workflow.name or "Workflow"
+        if run.status == "failed":
+            notif = Notification.objects.create(
+                user=run.workflow.owner,
+                type="run_failed",
+                title=f"{workflow_name} failed",
+                body=last_error_message[:200],  # Truncate long errors
+                link="/history",
+                data={"run_id": str(run.id), "workflow_id": str(run.workflow.id)},
+            )
+            # Push live update to the UI bell icon!
+            _emit(
+                run.id,
+                run.workflow.owner.id,
+                "notification_created",
+                {"id": str(notif.id)},
+            )
+
+        elif run.status == "success":
+            # (Optional) You can comment this out if you don't want a notification for every single success
+            notif = Notification.objects.create(
+                user=run.workflow.owner,
+                type="run_success",
+                title=f"{workflow_name} completed",
+                body="All steps executed successfully.",
+                link="/history",
+                data={"run_id": str(run.id), "workflow_id": str(run.workflow.id)},
+            )
+            _emit(
+                run.id,
+                run.workflow.owner.id,
+                "notification_created",
+                {"id": str(notif.id)},
+            )
+        # ---------------------------------------
+
         _emit(run.id, run.workflow.owner.id, "run_finished", {"status": run.status})
 
 

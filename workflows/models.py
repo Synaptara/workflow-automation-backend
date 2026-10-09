@@ -201,3 +201,65 @@ def toggle_workflow_schedule(sender, instance, **kwargs):
         PeriodicTask.objects.filter(name=task_name).update(enabled=False)
     else:
         PeriodicTask.objects.filter(name=task_name).update(enabled=True)
+
+
+# ... (existing imports and models remain unchanged) ...
+
+
+class Notification(models.Model):
+    """System-generated notifications for a specific user."""
+
+    TYPE_CHOICES = [
+        ("run_failed", "Run Failed"),
+        ("run_success", "Run Success"),
+        ("usage_warning", "Usage Warning"),
+        ("integration_error", "Integration Error"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="notifications"
+    )
+    type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    title = models.CharField(max_length=255)
+    body = models.TextField()
+    link = models.CharField(max_length=255, blank=True, null=True)
+    data = models.JSONField(default=dict, blank=True)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "is_read", "-created_at"]),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.type} - {self.title}"
+
+
+class Announcement(models.Model):
+    """Global product announcements managed via Django Admin."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    body = models.TextField()
+    link = models.CharField(max_length=255, blank=True, null=True)
+    published_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-published_at"]
+
+    def __str__(self):
+        return self.title
+
+
+class AnnouncementRead(models.Model):
+    """Tracks which users have read which global announcements."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    announcement = models.ForeignKey(Announcement, on_delete=models.CASCADE)
+    read_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("user", "announcement")

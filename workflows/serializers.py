@@ -2,7 +2,14 @@ from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from .models import StepRun, Workflow, WorkflowRun, WorkflowStep
+from .models import (
+    Announcement,
+    Notification,
+    StepRun,
+    Workflow,
+    WorkflowRun,
+    WorkflowStep,
+)
 
 
 class RegisterSerializer(serializers.ModelSerializer):
@@ -93,3 +100,38 @@ class WorkflowRunSerializer(serializers.ModelSerializer):
             "finished_at",
             "step_runs",
         ]
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notification
+        fields = [
+            "id",
+            "type",
+            "title",
+            "body",
+            "link",
+            "data",
+            "is_read",
+            "created_at",
+        ]
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    type = serializers.SerializerMethodField()
+    is_read = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField(source="published_at")
+
+    class Meta:
+        model = Announcement
+        fields = ["id", "type", "title", "body", "link", "is_read", "created_at"]
+
+    def get_type(self, obj):
+        return "product"
+
+    def get_is_read(self, obj):
+        user = self.context.get("request").user
+        if not user or not user.is_authenticated:
+            return False
+        # If it exists in the tracking table, they've read it
+        return hasattr(obj, "read_by_user") and obj.read_by_user

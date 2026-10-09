@@ -6,6 +6,7 @@ from .views import (
     CredentialViewSet,
     GlobalRunHistoryView,
     IntegrationOAuthView,
+    NotificationViewSet,
     RegisterView,
     SecureLoginView,
     SecureRefreshView,
@@ -21,6 +22,7 @@ from .views import (
 router = DefaultRouter()
 router.register("workflows", WorkflowViewSet, basename="workflow")
 router.register("credentials", CredentialViewSet, basename="credentials")
+router.register("notifications", NotificationViewSet, basename="notifications")
 
 urlpatterns = [
     path("auth/register/", RegisterView.as_view()),

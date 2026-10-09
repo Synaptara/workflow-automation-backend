@@ -1,6 +1,17 @@
 from django.contrib import admin
 
-from .models import Credential, StepRun, Workflow, WorkflowRun, WorkflowStep
+from .models import (
+    Announcement,
+    Credential,
+    Notification,
+    StepRun,
+    Workflow,
+    WorkflowRun,
+    WorkflowStep,
+)
+
+admin.site.register(Notification)
+admin.site.register(Announcement)
 
 admin.site.register(Workflow)
 admin.site.register(WorkflowStep)

@@ -5,6 +5,7 @@ import random
 from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import send_mail
+from django.db.models import Prefetch
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
@@ -15,8 +16,19 @@ from rest_framework.views import APIView
 
 from .condition import OPERATORS
 from .executors import EXECUTOR_REGISTRY
-from .models import Credential, TaskUsage, Workflow, WorkflowRun, WorkflowStep
+from .models import (
+    Announcement,
+    AnnouncementRead,
+    Credential,
+    Notification,
+    TaskUsage,
+    Workflow,
+    WorkflowRun,
+    WorkflowStep,
+)
 from .serializers import (
+    AnnouncementSerializer,
+    NotificationSerializer,
     RegisterSerializer,
     WorkflowRunSerializer,
     WorkflowSerializer,
@@ -845,3 +857,94 @@ class TestTriggerView(APIView):
             )
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class NotificationViewSet(viewsets.ViewSet):
+    """Handles fetching and reading notifications & announcements."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def list(self, request):
+        user = request.user
+        unread_only = request.query_params.get("unread") == "1"
+
+        # 1. Fetch User Notifications
+        notifs_qs = Notification.objects.filter(user=user)
+        if unread_only:
+            notifs_qs = notifs_qs.filter(is_read=False)
+        notifs = NotificationSerializer(notifs_qs[:50], many=True).data
+
+        # 2. Fetch Global Announcements (Annotate if read by this user)
+        read_prefetch = Prefetch(
+            "announcementread_set",
+            queryset=AnnouncementRead.objects.filter(user=user),
+            to_attr="user_reads",
+        )
+        announcements_qs = Announcement.objects.prefetch_related(read_prefetch)
+
+        announcements_data = []
+        for ann in announcements_qs[:20]:
+            is_read = len(ann.user_reads) > 0
+            if unread_only and is_read:
+                continue
+            # Attach a temporary attribute to use in the serializer
+            ann.read_by_user = is_read
+            announcements_data.append(
+                AnnouncementSerializer(ann, context={"request": request}).data
+            )
+
+        # 3. Merge and Sort
+        combined = notifs + announcements_data
+        combined.sort(key=lambda x: x["created_at"], reverse=True)
+
+        return Response(combined[:50])
+
+    @action(detail=False, methods=["get"], url_path="unread-count")
+    def unread_count(self, request):
+        user = request.user
+        notif_count = Notification.objects.filter(user=user, is_read=False).count()
+
+        # Total announcements minus ones the user has read
+        total_announcements = Announcement.objects.count()
+        read_announcements = AnnouncementRead.objects.filter(user=user).count()
+        unread_announcements = max(0, total_announcements - read_announcements)
+
+        return Response({"unread_count": notif_count + unread_announcements})
+
+    @action(detail=True, methods=["post"], url_path="read")
+    def mark_read(self, request, pk=None):
+        """Mark a specific notification or announcement as read."""
+        user = request.user
+
+        # Check if it's an announcement (UUID from the Announcement model)
+        if Announcement.objects.filter(id=pk).exists():
+            AnnouncementRead.objects.get_or_create(user=user, announcement_id=pk)
+            return Response({"status": "read"})
+
+        # Otherwise it's a standard notification
+        Notification.objects.filter(user=user, id=pk).update(is_read=True)
+        return Response({"status": "read"})
+
+    @action(detail=False, methods=["post"], url_path="read-all")
+    def mark_all_read(self, request):
+        user = request.user
+        # Mark all user notifications
+        Notification.objects.filter(user=user, is_read=False).update(is_read=True)
+
+        # Mark all current announcements as read
+        announcements = Announcement.objects.all()
+        reads_to_create = []
+        existing_reads = set(
+            AnnouncementRead.objects.filter(user=user).values_list(
+                "announcement_id", flat=True
+            )
+        )
+
+        for ann in announcements:
+            if ann.id not in existing_reads:
+                reads_to_create.append(AnnouncementRead(user=user, announcement=ann))
+
+        if reads_to_create:
+            AnnouncementRead.objects.bulk_create(reads_to_create)
+
+        return Response({"status": "all_read"})
