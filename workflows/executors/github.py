@@ -1,3 +1,5 @@
+import base64
+
 import requests
 
 from . import register
@@ -62,8 +64,6 @@ class GitHubExecutor(BaseExecutor):
             if not repo_full_name:
                 raise ValueError("Repository name (owner/repo) is required.")
 
-            import base64
-
             encoded_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
 
             # Check if file exists to get SHA for updating
@@ -102,3 +102,45 @@ class GitHubExecutor(BaseExecutor):
 
         else:
             raise ValueError(f"Unsupported GitHub event: {app_event}")
+
+    def register_webhook(
+        self, app_event: str, step_config: dict, webhook_url: str
+    ) -> None:
+        """Programmatically tells GitHub to send events to the Orkflo server."""
+        if app_event != "new_issue":
+            return
+
+        access_token = step_config.get("access_token")
+        repo_name = step_config.get("repo_name")
+
+        if not access_token or not repo_name:
+            raise ValueError(
+                "GitHub trigger requires 'repo_name' and a valid connection."
+            )
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+        # 1. Check existing hooks to prevent duplicate registrations
+        hooks_url = f"https://api.github.com/repos/{repo_name}/hooks"
+        existing_hooks_resp = requests.get(hooks_url, headers=headers, timeout=10)
+
+        if existing_hooks_resp.ok:
+            for hook in existing_hooks_resp.json():
+                if hook.get("config", {}).get("url") == webhook_url:
+                    return  # Webhook is already securely attached
+
+        # 2. Register the new webhook
+        payload = {
+            "name": "web",
+            "active": True,
+            "events": ["issues"],
+            "config": {"url": webhook_url, "content_type": "json", "insecure_ssl": "0"},
+        }
+
+        resp = requests.post(hooks_url, headers=headers, json=payload, timeout=10)
+        if not resp.ok:
+            raise ValueError(f"Failed to register GitHub webhook: {resp.text}")

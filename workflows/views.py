@@ -297,6 +297,45 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                 obj.parent = id_map[parent_client_id]
                 obj.save(update_fields=["parent"])
 
+        # --- NEW WEBHOOK REGISTRATION BLOCK ---
+        for s, obj in created:
+            if obj.step_type == "trigger" and obj.action_key in EXECUTOR_REGISTRY:
+                executor_class = EXECUTOR_REGISTRY[obj.action_key]
+                executor_instance = executor_class()
+
+                if hasattr(executor_instance, "register_webhook"):
+                    # Fetch the user's decrypted Vault credentials for GitHub
+                    vault_creds = Credential.objects.filter(
+                        owner=request.user, service=obj.action_key
+                    ).first()
+
+                    step_config = obj.config if isinstance(obj.config, dict) else {}
+                    if vault_creds:
+                        step_config.update(vault_creds.data)
+
+                    # Construct the public URL for the WebhookTriggerView
+                    # Falls back to a default if BACKEND_URL isn't in your .env yet
+                    backend_url = config(
+                        "BACKEND_URL", default="https://api.orkflo.com"
+                    )
+
+                    # Ensure no trailing slash duplication
+                    backend_url = backend_url.rstrip("/")
+                    webhook_url = f"{backend_url}/api/webhooks/{workflow.id}/{workflow.webhook_secret}/"
+
+                    try:
+                        executor_instance.register_webhook(
+                            obj.app_event, step_config, webhook_url
+                        )
+                    except Exception as e:
+                        return Response(
+                            {
+                                "detail": f"Failed to register {obj.action_key} webhook: {str(e)}"
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+        # --- END WEBHOOK REGISTRATION BLOCK ---
+
         has_schedule = False
         for s, obj in created:
             if obj.step_type == "trigger" and obj.action_key == "schedule":
