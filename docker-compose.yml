@@ -1,0 +1,95 @@
+services:
+  # 1. In-memory message broker & cache
+  redis:
+    image: redis:7-alpine
+    container_name: orkflo_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional: Uncomment if running PostgreSQL inside Docker
+  # db:
+  #   image: postgres:16-alpine
+  #   container_name: orkflo_db
+  #   restart: always
+  #   environment:
+  #     POSTGRES_DB: ${DB_NAME}
+  #     POSTGRES_USER: ${DB_USER}
+  #     POSTGRES_PASSWORD: ${DB_PASSWORD}
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+
+  # 2. Daphne ASGI Web API Server
+  web:
+    build: .
+    container_name: orkflo_web
+    restart: always
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             daphne -b 0.0.0.0 -p 8000 config.asgi:application"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - static_volume:/app/staticfiles
+
+  # 3. Asynchronous Workflow Task Runner
+  celery_worker:
+    build: .
+    container_name: orkflo_celery
+    restart: always
+    command: celery -A config worker -l info -c 4
+    env_file:
+      - .env
+    depends_on:
+      web:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # 4. Periodic Task Scheduler
+  celery_beat:
+    build: .
+    container_name: orkflo_celery_beat
+    restart: always
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    env_file:
+      - .env
+    depends_on:
+      web:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # 5. Discord Ingress Gateway
+  discord_ingress:
+    build: .
+    container_name: orkflo_discord
+    restart: always
+    # Update command to match the exact command your orkflo-discord.service executed
+    command: python manage.py run_discord_ingress
+    env_file:
+      - .env
+    depends_on:
+      web:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+  postgres_data:
+  static_volume:
