@@ -30,7 +30,11 @@ urlpatterns = [
     path("auth/refresh/", SecureRefreshView.as_view()),
     path("auth/social/<str:provider>/", SocialAuthView.as_view()),
     path("credentials/oauth/<str:provider>/", IntegrationOAuthView.as_view()),
-    path("hooks/<uuid:workflow_id>/<str:secret>/", WebhookTriggerView.as_view()),
+    path(
+        "webhooks/<uuid:workflow_id>/<str:secret>/",
+        WebhookTriggerView.as_view(),
+        name="webhook_trigger",
+    ),
     # 2. Wire the Ingestion Engine here
     path(
         "ingress/<str:source>/",
