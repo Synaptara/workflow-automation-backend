@@ -78,11 +78,15 @@ class StepRunSerializer(serializers.ModelSerializer):
 
 class WorkflowRunSerializer(serializers.ModelSerializer):
     step_runs = StepRunSerializer(many=True, read_only=True)
+    # 1. Reach across the foreign key to grab the actual workflow name
+    workflow_name = serializers.CharField(source="workflow.name", read_only=True)
 
     class Meta:
         model = WorkflowRun
         fields = [
             "id",
+            "workflow",  # Keep the ID for linking
+            "workflow_name",  # 2. Add the new name field here
             "status",
             "trigger_payload",
             "started_at",
