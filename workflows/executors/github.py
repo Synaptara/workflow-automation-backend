@@ -201,3 +201,12 @@ class GitHubExecutor(BaseExecutor):
             raise ValueError(
                 f"Failed to register GitHub webhook. Check your repo name and permissions. Error: {str(e)}"
             )
+
+    def match_ingress_event(
+        self, app_event: str, event_type: str, payload: dict, step_config: dict
+    ) -> bool:
+        repo_filter = step_config.get("repository", "").strip()
+        incoming_repo = payload.get("repository", {}).get("full_name", "").strip()
+        if repo_filter and repo_filter != incoming_repo:
+            return False
+        return True
