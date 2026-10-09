@@ -11,8 +11,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-BASE_URL = os.getenv("VITE_API_URL", "http://127.0.0.1:8000")
-INGRESS_URL = f"{BASE_URL.rstrip('/')}/api/ingress/discord/"
+INTERNAL_INGRESS = "http://web:8000/api/ingress/discord/"
+BASE_URL = (
+    os.getenv("BACKEND_INTERNAL_URL")
+    or os.getenv("BACKEND_URL")
+    or os.getenv("VITE_API_URL")
+)
+
+INGRESS_URL = (
+    f"{BASE_URL.rstrip('/')}/api/ingress/discord/" if BASE_URL else INTERNAL_INGRESS
+)
+
 
 # Setup Privileged Gateway Intents
 intents = discord.Intents.default()
@@ -131,16 +140,11 @@ if __name__ == "__main__":
         print("FATAL: DISCORD_BOT_TOKEN missing from environment.", flush=True)
         sys.exit(1)
 
-    loop = asyncio.get_event_loop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown()))
-        except (NotImplementedError, RuntimeError):
-            pass
-
     try:
         client.run(TOKEN)
     finally:
         if session and not session.closed:
-            loop.run_until_complete(session.close())
+            try:
+                asyncio.run(session.close())
+            except Exception:
+                pass

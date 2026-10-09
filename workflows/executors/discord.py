@@ -217,7 +217,7 @@ class DiscordExecutor(BaseExecutor):
         self, app_event: str, step_config: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Fetches live data from Discord for the UI to use as variables.
+        Fetches live data from Discord for the UI to use as step variables.
         """
         token = self._resolve_token(step_config)
 
@@ -226,7 +226,6 @@ class DiscordExecutor(BaseExecutor):
             if not guild_id:
                 raise ValueError("Server (Guild) ID is required to fetch members.")
 
-            # Fetch the most recent member from the guild
             res = self._send_request(
                 "GET", f"/guilds/{guild_id}/members?limit=1", token
             )
@@ -239,12 +238,37 @@ class DiscordExecutor(BaseExecutor):
                 "event_type": "member_join",
                 "author_id": user.get("id"),
                 "author_name": user.get("username"),
-                "guild_id": guild_id,
+                "guild_id": str(guild_id),
                 "created_at": member.get("joined_at"),
             }
 
         elif app_event == "new_message":
-            # Similar logic to fetch the latest message from a channel
-            raise NotImplementedError("Fetching recent messages is coming soon.")
+            channel_id = step_config.get("channel_id")
+            if not channel_id:
+                raise ValueError("Channel ID is required to fetch test messages.")
+
+            res = self._send_request(
+                "GET", f"/channels/{channel_id}/messages?limit=1", token
+            )
+            if not res or not isinstance(res, list) or len(res) == 0:
+                return {
+                    "event_type": "new_message",
+                    "channel_id": str(channel_id),
+                    "author_id": "123456789",
+                    "author_name": "sample_user",
+                    "content": "Sample message for workflow testing",
+                }
+
+            msg = res[0]
+            author = msg.get("author", {})
+            return {
+                "event_type": "new_message",
+                "message_id": msg.get("id"),
+                "channel_id": msg.get("channel_id"),
+                "author_id": author.get("id"),
+                "author_name": author.get("username"),
+                "content": msg.get("content", ""),
+                "created_at": msg.get("timestamp"),
+            }
 
         raise ValueError(f"Cannot fetch test data for event: {app_event}")

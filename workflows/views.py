@@ -5,6 +5,7 @@ import random
 from django.conf import settings
 from django.core.cache import cache
 from django.core.mail import send_mail
+from django.db import transaction
 from django.db.models import Prefetch
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 from rest_framework import generics, permissions, status, viewsets
@@ -273,93 +274,99 @@ class WorkflowViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        workflow.steps.all().delete()
-        id_map = {}
-        created = []
-        for s in steps_data:
-            client_id = s["client_id"]
-            obj = WorkflowStep.objects.create(
-                workflow=workflow,
-                client_id=client_id,
-                step_type=s["step_type"],
-                action_key=s.get("action_key", ""),
-                app_event=s.get("app_event", ""),
-                config=s.get("config", {}),
-                branch=s.get("branch", ""),
-                order=s.get("order", 0),
-            )
-            id_map[client_id] = obj
-            created.append((s, obj))
-
-        for s, obj in created:
-            parent_client_id = s.get("parent_client_id")
-            if parent_client_id and parent_client_id in id_map:
-                obj.parent = id_map[parent_client_id]
-                obj.save(update_fields=["parent"])
-
-        # --- NEW WEBHOOK REGISTRATION BLOCK ---
-        for s, obj in created:
-            if obj.step_type == "trigger" and obj.action_key in EXECUTOR_REGISTRY:
-                executor_class = EXECUTOR_REGISTRY[obj.action_key]
-                executor_instance = executor_class()
-
-                if hasattr(executor_instance, "register_webhook"):
-                    # Fetch the user's decrypted Vault credentials for GitHub
-                    vault_creds = Credential.objects.filter(
-                        owner=request.user, service=obj.action_key
-                    ).first()
-
-                    step_config = obj.config if isinstance(obj.config, dict) else {}
-                    if vault_creds:
-                        step_config.update(vault_creds.data)
-
-                    # Construct the public URL for the WebhookTriggerView
-                    # Falls back to a default if BACKEND_URL isn't in your .env yet
-                    backend_url = config(
-                        "BACKEND_URL", default="https://api.orkflo.com"
+        # INDUSTRIAL STANDARD: Atomic Database Transaction
+        # If the webhook fails, the database rolls back and restores the old steps.
+        try:
+            with transaction.atomic():
+                workflow.steps.all().delete()
+                id_map = {}
+                created = []
+                for s in steps_data:
+                    client_id = s["client_id"]
+                    obj = WorkflowStep.objects.create(
+                        workflow=workflow,
+                        client_id=client_id,
+                        step_type=s["step_type"],
+                        action_key=s.get("action_key", ""),
+                        app_event=s.get("app_event", ""),
+                        config=s.get("config", {}),
+                        branch=s.get("branch", ""),
+                        order=s.get("order", 0),
                     )
+                    id_map[client_id] = obj
+                    created.append((s, obj))
 
-                    # Ensure no trailing slash duplication
-                    backend_url = backend_url.rstrip("/")
-                    webhook_url = f"{backend_url}/api/webhooks/{workflow.id}/{workflow.webhook_secret}/"
+                for s, obj in created:
+                    parent_client_id = s.get("parent_client_id")
+                    if parent_client_id and parent_client_id in id_map:
+                        obj.parent = id_map[parent_client_id]
+                        obj.save(update_fields=["parent"])
 
-                    try:
-                        executor_instance.register_webhook(
-                            obj.app_event, step_config, webhook_url
+                # --- WEBHOOK REGISTRATION BLOCK ---
+                for s, obj in created:
+                    if (
+                        obj.step_type == "trigger"
+                        and obj.action_key in EXECUTOR_REGISTRY
+                    ):
+                        # CRITICAL FIX: Removed the () instantiation here.
+                        executor_instance = EXECUTOR_REGISTRY[obj.action_key]
+
+                        if hasattr(executor_instance, "register_webhook"):
+                            vault_creds = Credential.objects.filter(
+                                owner=request.user, service=obj.action_key
+                            ).first()
+
+                            step_config = (
+                                obj.config if isinstance(obj.config, dict) else {}
+                            )
+                            if vault_creds:
+                                step_config.update(vault_creds.data)
+
+                            backend_url = config(
+                                "BACKEND_URL", default="https://api.orkflo.com"
+                            ).rstrip("/")
+                            webhook_url = f"{backend_url}/api/webhooks/{workflow.id}/{workflow.webhook_secret}/"
+
+                            # This will raise a ValueError if it fails, which breaks the transaction atomic block
+                            # and safely rolls back the database.
+                            executor_instance.register_webhook(
+                                obj.app_event, step_config, webhook_url
+                            )
+                # --- END WEBHOOK REGISTRATION BLOCK ---
+
+                has_schedule = False
+                for s, obj in created:
+                    if obj.step_type == "trigger" and obj.action_key == "schedule":
+                        has_schedule = True
+                        interval_minutes = int(obj.config.get("interval", 15))
+                        schedule, _ = IntervalSchedule.objects.get_or_create(
+                            every=interval_minutes,
+                            period=IntervalSchedule.MINUTES,
                         )
-                    except Exception as e:
-                        return Response(
-                            {
-                                "detail": f"Failed to register {obj.action_key} webhook: {str(e)}"
+                        PeriodicTask.objects.update_or_create(
+                            name=f"workflow-schedule-{workflow.id}",
+                            defaults={
+                                "interval": schedule,
+                                "task": "workflows.tasks.trigger_scheduled_workflow",
+                                "args": json.dumps([str(workflow.id)]),
+                                "enabled": workflow.is_active,
                             },
-                            status=status.HTTP_400_BAD_REQUEST,
                         )
-        # --- END WEBHOOK REGISTRATION BLOCK ---
+                        break
 
-        has_schedule = False
-        for s, obj in created:
-            if obj.step_type == "trigger" and obj.action_key == "schedule":
-                has_schedule = True
-                interval_minutes = int(obj.config.get("interval", 15))
-                schedule, _ = IntervalSchedule.objects.get_or_create(
-                    every=interval_minutes,
-                    period=IntervalSchedule.MINUTES,
-                )
-                PeriodicTask.objects.update_or_create(
-                    name=f"workflow-schedule-{workflow.id}",
-                    defaults={
-                        "interval": schedule,
-                        "task": "workflows.tasks.trigger_scheduled_workflow",
-                        "args": json.dumps([str(workflow.id)]),
-                        "enabled": workflow.is_active,
-                    },
-                )
-                break
+                if not has_schedule:
+                    PeriodicTask.objects.filter(
+                        name=f"workflow-schedule-{workflow.id}"
+                    ).delete()
 
-        if not has_schedule:
-            PeriodicTask.objects.filter(
-                name=f"workflow-schedule-{workflow.id}"
-            ).delete()
+        except ValueError as e:
+            # Catch the webhook registration failure and send it to the frontend
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(
+                {"detail": "An unexpected error occurred while saving."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         return Response(WorkflowStepSerializer(workflow.steps.all(), many=True).data)
 
@@ -860,7 +867,7 @@ class TestTriggerView(APIView):
     def post(self, request):
         action_key = request.data.get("action_key")
         app_event = request.data.get("app_event")
-        config = request.data.get("config", {})
+        config_data = request.data.get("config", {})
 
         if not action_key or not app_event:
             return Response(
@@ -874,28 +881,29 @@ class TestTriggerView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Retrieve the user's encrypted credentials from the Vault
         vault_creds = Credential.objects.filter(
             owner=request.user, service=action_key
         ).first()
         if vault_creds:
-            # Inject the credentials into the config so the executor can authenticate
-            config.update(vault_creds.data)
+            config_data.update(vault_creds.data)
 
-        executor = EXECUTOR_REGISTRY[action_key]()
+        executor = EXECUTOR_REGISTRY[action_key]
 
         try:
-            # We call a special 'fetch_test_data' method on the executor
-            test_data = executor.fetch_test_data(app_event, config)
+            test_data = executor.fetch_test_data(app_event, config_data)
             return Response(test_data, status=status.HTTP_200_OK)
-
         except NotImplementedError:
             return Response(
                 {"error": "Live fetching is not yet supported for this integration."},
                 status=status.HTTP_501_NOT_IMPLEMENTED,
             )
-        except Exception as e:
+        except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response(
+                {"error": "Failed to fetch test data."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class NotificationViewSet(viewsets.ViewSet):
