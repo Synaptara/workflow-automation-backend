@@ -30,10 +30,17 @@ urlpatterns = [
     path("auth/refresh/", SecureRefreshView.as_view()),
     path("auth/social/<str:provider>/", SocialAuthView.as_view()),
     path("credentials/oauth/<str:provider>/", IntegrationOAuthView.as_view()),
+    # Primary internal and external webhook endpoint
     path(
         "webhooks/<uuid:workflow_id>/<str:secret>/",
         WebhookTriggerView.as_view(),
         name="webhook_trigger",
+    ),
+    # ALIAS: Support for legacy frontend UI test requests
+    path(
+        "hooks/<uuid:workflow_id>/<str:secret>/",
+        WebhookTriggerView.as_view(),
+        name="webhook_trigger_alias",
     ),
     # 2. Wire the Ingestion Engine here
     path(
