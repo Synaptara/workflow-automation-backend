@@ -702,9 +702,18 @@ class WebhookTriggerView(APIView):
         except Workflow.DoesNotExist:
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        run = WorkflowRun.objects.create(
-            workflow=workflow, trigger_payload=request.data
-        )
+        # --- INDUSTRIAL STANDARD FIX: Flatten the payload ---
+        payload = request.data
+        trigger_step = workflow.steps.filter(step_type="trigger").first()
+
+        if trigger_step and trigger_step.action_key in EXECUTOR_REGISTRY:
+            executor = EXECUTOR_REGISTRY[trigger_step.action_key]
+            # If the executor has a normalizer, use it to flatten the JSON
+            if hasattr(executor, "normalize_payload"):
+                payload = executor.normalize_payload(trigger_step.app_event, payload)
+        # ----------------------------------------------------
+
+        run = WorkflowRun.objects.create(workflow=workflow, trigger_payload=payload)
         run_workflow.delay(str(run.id))
         return Response({"run_id": str(run.id)}, status=status.HTTP_202_ACCEPTED)
 

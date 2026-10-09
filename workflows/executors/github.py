@@ -137,6 +137,27 @@ class GitHubExecutor(BaseExecutor):
         except requests.RequestException as e:
             raise ValueError(f"Failed to fetch test data: {str(e)}")
 
+    def normalize_payload(self, app_event: str, raw_payload: dict) -> dict:
+        """
+        Translates raw deeply-nested webhook payloads into the flat dictionary
+        that matches the variables exposed to the frontend UI.
+        """
+        if app_event == "new_issue":
+            issue = raw_payload.get("issue", {})
+            repo = raw_payload.get("repository", {})
+            user = issue.get("user", {})
+
+            return {
+                "event_type": "new_issue",
+                "issue_title": issue.get("title", "No Title"),
+                "issue_body": issue.get("body", "No Description provided."),
+                "author": user.get("login", "Unknown"),
+                "repo_name": repo.get("full_name", repo.get("name", "Unknown Repo")),
+                "url": issue.get("html_url", ""),
+            }
+
+        return raw_payload
+
     def register_webhook(
         self, app_event: str, step_config: dict, webhook_url: str
     ) -> None:
