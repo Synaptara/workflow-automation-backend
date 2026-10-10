@@ -164,14 +164,14 @@ class GitHubExecutor(BaseExecutor):
         if app_event != "new_issue":
             return
 
-        access_token = step_config.get("access_token")
         repo_name = step_config.get("repo_name")
+        if not repo_name:
+            raise ValueError("GitHub trigger requires 'repo_name'.")
 
-        if not access_token or not repo_name:
-            raise ValueError(
-                "GitHub trigger requires 'repo_name' and a valid connection."
-            )
-
+        access_token = step_config.get("access_token")
+        # Do not crash the UI save operation if the backend hasn't injected the Vault token yet
+        if not access_token:
+            return
         headers = self._get_headers(access_token)
         hooks_url = f"https://api.github.com/repos/{repo_name}/hooks"
 
