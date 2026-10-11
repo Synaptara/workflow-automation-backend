@@ -26,4 +26,7 @@ RUN chmod +x /app/entrypoint.sh
 
 COPY . /app/
 
+RUN useradd -m -u 1000 app && chown -R app:app /app
+USER app
+
 ENTRYPOINT ["/app/entrypoint.sh"]
