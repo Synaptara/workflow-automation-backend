@@ -10,3 +10,13 @@ class BaseExecutor:
         Defaults to True unless overridden by specific integration logic.
         """
         return True
+
+    def fetch_test_data(self, app_event: str, config: dict) -> dict:
+        """
+        Fetches live test data for the Workflow Builder UI.
+        If an executor doesn't implement this, the backend raises NotImplementedError,
+        and the frontend falls back to the mock schema.
+        """
+        raise NotImplementedError(
+            "Live fetching is not supported for this integration."
+        )

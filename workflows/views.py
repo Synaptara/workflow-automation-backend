@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import random
 
 from django.conf import settings
@@ -278,23 +279,31 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         # If the webhook fails, the database rolls back and restores the old steps.
         try:
             with transaction.atomic():
-                workflow.steps.all().delete()
-                id_map = {}
-                created = []
+                existing = {st.client_id: st for st in workflow.steps.all()}
+                id_map, created = {}, []
                 for s in steps_data:
-                    client_id = s["client_id"]
-                    obj = WorkflowStep.objects.create(
-                        workflow=workflow,
-                        client_id=client_id,
+                    cid = s["client_id"]
+                    fields = dict(
                         step_type=s["step_type"],
                         action_key=s.get("action_key", ""),
                         app_event=s.get("app_event", ""),
                         config=s.get("config", {}),
                         branch=s.get("branch", ""),
                         order=s.get("order", 0),
+                        parent=None,
                     )
-                    id_map[client_id] = obj
+                    obj = existing.get(cid)
+                    if obj:
+                        for k, v in fields.items():
+                            setattr(obj, k, v)
+                        obj.save()
+                    else:
+                        obj = WorkflowStep.objects.create(
+                            workflow=workflow, client_id=cid, **fields
+                        )
+                    id_map[cid] = obj
                     created.append((s, obj))
+                workflow.steps.exclude(client_id__in=id_map.keys()).delete()
 
                 for s, obj in created:
                     parent_client_id = s.get("parent_client_id")
@@ -349,99 +358,6 @@ class WorkflowViewSet(viewsets.ModelViewSet):
         runs = workflow.runs.order_by("-started_at")[:50]
         return Response(WorkflowRunSerializer(runs, many=True).data)
 
-        # ... inside WorkflowViewSet ...
-
-        @action(detail=False, methods=["get"])
-        def templates(self, request):
-            """Returns a list of pre-built workflow templates."""
-            templates = [
-                {
-                    "id": "trello-to-discord",
-                    "name": "Trello to Discord Alert",
-                    "description": "Automatically send a Discord message when a new Trello card is created.",
-                    "color": "#5865F2",
-                    "steps": [
-                        {
-                            "client_id": "trigger_1",
-                            "step_type": "trigger",
-                            "action_key": "trello_new_card",
-                            "config": {"ui_pos": {"x": 250, "y": 200}},
-                        },
-                        {
-                            "client_id": "action_1",
-                            "step_type": "action",
-                            "action_key": "discord",
-                            "config": {
-                                "content": "New Trello Card Created: {{trigger.name}}\n{{trigger.url}}",
-                                "ui_pos": {"x": 600, "y": 200},
-                            },
-                            "parent_client_id": "trigger_1",
-                        },
-                    ],
-                },
-                {
-                    "id": "webhook-to-notion",
-                    "name": "Save Webhook Data to Notion",
-                    "description": "Listen for incoming data and log it directly into a Notion database as a new page.",
-                    "color": "#000000",
-                    "steps": [
-                        {
-                            "client_id": "trigger_1",
-                            "step_type": "trigger",
-                            "action_key": "webhook",
-                            "config": {"ui_pos": {"x": 250, "y": 200}},
-                        },
-                        {
-                            "client_id": "action_1",
-                            "step_type": "action",
-                            "action_key": "notion",
-                            "config": {
-                                "title": "New Webhook Alert",
-                                "content": "Received Payload: {{trigger}}",
-                                "ui_pos": {"x": 600, "y": 200},
-                            },
-                            "parent_client_id": "trigger_1",
-                        },
-                    ],
-                },
-            ]
-            return Response(templates)
-
-        @action(detail=False, methods=["post"])
-        def use_template(self, request):
-            """Clones a template into a real workflow for the authenticated user."""
-            template_name = request.data.get("name", "New Workflow from Template")
-            steps_data = request.data.get("steps", [])
-
-            # Create the workflow
-            workflow = Workflow.objects.create(owner=request.user, name=template_name)
-
-            # Clone the steps
-            id_map = {}
-            created = []
-            for s in steps_data:
-                obj = WorkflowStep.objects.create(
-                    workflow=workflow,
-                    client_id=s.get("client_id", ""),
-                    step_type=s["step_type"],
-                    action_key=s.get("action_key", ""),
-                    config=s.get("config", {}),
-                )
-                id_map[s["client_id"]] = obj
-                created.append((s, obj))
-
-            # Wire up the parent/child edges
-            for s, obj in created:
-                parent_client_id = s.get("parent_client_id")
-                if parent_client_id:
-                    obj.parent = id_map[parent_client_id]
-                    obj.save(update_fields=["parent"])
-
-            return Response(
-                {"id": workflow.id, "name": workflow.name},
-                status=status.HTTP_201_CREATED,
-            )
-
 
 class GlobalRunHistoryView(generics.ListAPIView):
     """Fetches the 100 most recent runs across ALL of the user's workflows."""
@@ -453,6 +369,7 @@ class GlobalRunHistoryView(generics.ListAPIView):
         return (
             WorkflowRun.objects.filter(workflow__owner=self.request.user)
             .select_related("workflow")
+            .prefetch_related("step_runs__step")
             .order_by("-started_at")[:100]
         )
 
@@ -675,6 +592,13 @@ class WebhookTriggerView(APIView):
         except Workflow.DoesNotExist:
             return Response({"detail": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        usage = TaskUsage.objects.filter(user=workflow.owner).first()
+        if usage and usage.limit and usage.count >= usage.limit:
+            return Response(
+                {"detail": "Task limit reached."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         # --- INDUSTRIAL STANDARD FIX: Flatten the payload ---
         payload = request.data
         trigger_step = workflow.steps.filter(step_type="trigger").first()
@@ -731,11 +655,19 @@ class UniversalIngressView(APIView):
     Handles deduplication and drops payloads directly into the Celery Queue.
     """
 
-    permission_classes = [
-        permissions.AllowAny
-    ]  # Protected by your internal architecture/Discord Bot
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = []
 
     def post(self, request, source):
+        import hmac
+
+        expected = config("INGRESS_SECRET", default="")
+        if not expected or not hmac.compare_digest(
+            request.headers.get("X-Ingress-Secret", ""), expected
+        ):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         payload = request.data
 
         # 1. Deduplication Engine: Extract a unique ID
@@ -789,7 +721,7 @@ class SecureLoginView(TokenObtainPairView):
                 max_age=7 * 24 * 60 * 60,  # 7 days
                 httponly=True,
                 secure=not settings.DEBUG,  # Secure (HTTPS) in production
-                samesite="Lax",
+                samesite="None" if not settings.DEBUG else "Lax",
             )
         return response
 
@@ -977,3 +909,28 @@ class NotificationViewSet(viewsets.ViewSet):
             AnnouncementRead.objects.bulk_create(reads_to_create)
 
         return Response({"status": "all_read"})
+
+
+class RunDetailView(generics.RetrieveAPIView):
+    serializer_class = WorkflowRunSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            WorkflowRun.objects.filter(workflow__owner=self.request.user)
+            .select_related("workflow")
+            .prefetch_related("step_runs__step")
+        )
+
+
+class LogoutView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = []
+
+    def post(self, request):
+        res = Response(status=status.HTTP_204_NO_CONTENT)
+        res.delete_cookie(
+            "refresh_token", samesite="None" if not settings.DEBUG else "Lax"
+        )
+        return res

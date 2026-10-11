@@ -95,7 +95,10 @@ class GitHubExecutor(BaseExecutor):
             # Safely extract GitHub's specific error message if available
             error_msg = str(e)
             if hasattr(e, "response") and e.response is not None:
-                error_msg = e.response.json().get("message", error_msg)
+                try:
+                    error_msg = e.response.json().get("message", error_msg)
+                except ValueError:
+                    pass
             raise ValueError(f"GitHub API Error: {error_msg}")
 
     def fetch_test_data(self, app_event: str, step_config: dict) -> dict:

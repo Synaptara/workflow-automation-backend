@@ -17,7 +17,7 @@ _fernet = Fernet(_key)
 
 
 class EncryptedJSONField(models.TextField):
-    """Stores JSON dictionaries as AES-256 encrypted strings in the database."""
+    """Stores JSON dictionaries as AES-128 encrypted strings in the database."""
 
     def get_prep_value(self, value):
         if value is None:
@@ -112,6 +112,9 @@ class WorkflowRun(models.Model):
     trigger_payload = models.JSONField(default=dict)
     started_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["workflow", "-started_at"])]
 
 
 class StepRun(models.Model):

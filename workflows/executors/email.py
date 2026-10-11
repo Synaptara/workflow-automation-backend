@@ -1,49 +1,51 @@
-import resend
-from decouple import config as env_config
+import re
+
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.mail import EmailMessage, get_connection
+from django.core.validators import validate_email
 
 from . import register
 from .base import BaseExecutor
+
+MAX_RECIPIENTS = 5
 
 
 @register("email")
 class EmailExecutor(BaseExecutor):
     def execute(self, app_event: str, step_config: dict, context: dict) -> dict:
-
-        # 1. Secure Credential Loading
-        api_key = env_config("RESEND_API_KEY", default=None)
-        if not api_key:
+        if not settings.EMAIL_HOST_USER or not settings.EMAIL_HOST_PASSWORD:
             raise ValueError(
-                "RESEND_API_KEY is missing in backend environment variables."
+                "EMAIL_HOST_USER / EMAIL_HOST_PASSWORD are not set on the backend."
             )
 
-        resend.api_key = api_key
+        raw = str(step_config.get("to") or "")
+        recipients = [r.strip() for r in re.split(r"[,;\s]+", raw) if r.strip()]
+        if not recipients:
+            raise ValueError("Recipient 'to' email address is required.")
+        if len(recipients) > MAX_RECIPIENTS:
+            raise ValueError(f"At most {MAX_RECIPIENTS} recipients per email.")
+        for r in recipients:
+            try:
+                validate_email(r)
+            except ValidationError:
+                raise ValueError(f"Invalid email address: {r}")
 
-        # 2. Extract Data from UI Config
-        to_email = step_config.get("to")
-        subject = step_config.get("subject", "Orkflo Automation")
-        body = step_config.get("body", "")
+        subject = " ".join(
+            str(step_config.get("subject") or "Orkflo Automation").split()
+        )[:200]
+        body = str(step_config.get("body") or "")
 
-        # 3. Strict Validation
-        if not to_email:
-            raise ValueError(
-                "Recipient 'to' email address is required but was not provided."
-            )
-
-        # 4. Payload Construction
-        params = {
-            # REMINDER: The resend.dev testing domain will ONLY deliver to the email
-            # address you signed up to Resend with. Change this to your custom domain
-            # (e.g., "noreply@orkflo.com") once verified.
-            "from": "Orkflo <onboarding@resend.dev>",
-            "to": [to_email],
-            "subject": subject,
-            "text": body,
-        }
-
-        # 5. Execution & Error Catching
         try:
-            resp = resend.Emails.send(params)
-            return {"status": 200, "delivered": True, "email_id": resp.get("id")}
+            msg = EmailMessage(
+                subject=subject,
+                body=body,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=recipients,
+                connection=get_connection(timeout=10),
+            )
+            sent = msg.send(fail_silently=False)
         except Exception as e:
-            # Catch API outages or bad data and pass the exact error back to your Run logs
-            raise RuntimeError(f"Resend API Error: {str(e)}")
+            raise RuntimeError(f"Email send failed: {e}")
+
+        return {"status": 200, "delivered": bool(sent), "recipients": recipients}
