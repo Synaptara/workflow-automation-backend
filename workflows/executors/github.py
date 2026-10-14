@@ -6,6 +6,12 @@ from . import register
 from .base import BaseExecutor
 
 
+class VaultAuthError(ValueError):
+    """Raised when a stored OAuth token or API key is expired or revoked."""
+
+    pass
+
+
 @register("github")
 class GitHubExecutor(BaseExecutor):
     def _get_headers(self, access_token: str) -> dict:
@@ -18,8 +24,8 @@ class GitHubExecutor(BaseExecutor):
     def execute(self, app_event: str, step_config: dict, context: dict) -> dict:
         access_token = step_config.get("access_token")
         if not access_token:
-            raise ValueError(
-                "GitHub access token missing. Please connect GitHub in the Vault."
+            raise VaultAuthError(
+                "GitHub is not connected. Open the Integrations Vault to authenticate."
             )
 
         headers = self._get_headers(access_token)
@@ -92,9 +98,22 @@ class GitHubExecutor(BaseExecutor):
                 raise ValueError(f"Unsupported GitHub event: {app_event}")
 
         except requests.RequestException as e:
-            # Safely extract GitHub's specific error message if available
-            error_msg = str(e)
-            if hasattr(e, "response") and e.response is not None:
+            status_code = getattr(e.response, "status_code", None)
+            if status_code == 401:
+                raise VaultAuthError(
+                    "Your GitHub connection has expired or been revoked. Re-authenticate GitHub in the Vault."
+                )
+            if status_code == 403:
+                raise ValueError(
+                    "GitHub rate limit reached or your token lacks 'repo' permissions."
+                )
+            if status_code == 404:
+                raise ValueError(
+                    "GitHub repository or branch not found. Check the owner/repo format."
+                )
+
+            error_msg = "GitHub request failed."
+            if getattr(e, "response", None) is not None:
                 try:
                     error_msg = e.response.json().get("message", error_msg)
                 except ValueError:
@@ -102,17 +121,18 @@ class GitHubExecutor(BaseExecutor):
             raise ValueError(f"GitHub API Error: {error_msg}")
 
     def fetch_test_data(self, app_event: str, step_config: dict) -> dict:
-        """Fetches a real issue from the user's repository to use as test variables in the UI."""
         if app_event != "new_issue":
             return {"message": "Test data not available for this event type."}
 
-        repo_name = step_config.get("repo_name")
+        repo_name = str(step_config.get("repo_name") or "").strip()
         access_token = step_config.get("access_token")
 
-        if not repo_name or not access_token:
-            raise ValueError(
-                "Repository name and connection required to fetch test data."
+        if not access_token:
+            raise VaultAuthError(
+                "GitHub is not connected. Open the Integrations Vault to authenticate."
             )
+        if not repo_name:
+            raise ValueError("Enter a Repository Name (owner/repo) first.")
 
         try:
             resp = requests.get(
@@ -127,6 +147,9 @@ class GitHubExecutor(BaseExecutor):
                 return {
                     "issue_title": "Sample Issue",
                     "issue_body": "No real issues found in repo.",
+                    "author": "octocat",
+                    "repo_name": repo_name,
+                    "url": f"https://github.com/{repo_name}/issues/1",
                 }
 
             issue = issues[0]
@@ -138,13 +161,18 @@ class GitHubExecutor(BaseExecutor):
                 "url": issue.get("html_url"),
             }
         except requests.RequestException as e:
-            raise ValueError(f"Failed to fetch test data: {str(e)}")
+            status_code = getattr(e.response, "status_code", None)
+            if status_code == 401:
+                raise VaultAuthError(
+                    "Your GitHub connection has expired. Re-authenticate GitHub in the Vault."
+                )
+            if status_code == 404:
+                raise ValueError(
+                    f"Repository '{repo_name}' not found or you don't have access to it."
+                )
+            raise ValueError("Could not fetch issues from GitHub. Please try again.")
 
     def normalize_payload(self, app_event: str, raw_payload: dict) -> dict:
-        """
-        Translates raw deeply-nested webhook payloads into the flat dictionary
-        that matches the variables exposed to the frontend UI.
-        """
         if app_event == "new_issue":
             issue = raw_payload.get("issue", {})
             repo = raw_payload.get("repository", {})
@@ -167,26 +195,35 @@ class GitHubExecutor(BaseExecutor):
         if app_event != "new_issue":
             return
 
-        repo_name = step_config.get("repo_name")
+        repo_name = str(step_config.get("repo_name") or "").strip()
         if not repo_name:
-            raise ValueError("GitHub trigger requires 'repo_name'.")
+            raise ValueError("GitHub trigger requires a Repository Name (owner/repo).")
 
         access_token = step_config.get("access_token")
-        # Do not crash the UI save operation if the backend hasn't injected the Vault token yet
         if not access_token:
-            return
+            raise VaultAuthError(
+                "GitHub token missing or expired. Re-authenticate GitHub in the Integrations Vault."
+            )
+
         headers = self._get_headers(access_token)
         hooks_url = f"https://api.github.com/repos/{repo_name}/hooks"
 
         try:
-            # 1. Check existing hooks to prevent duplicate registrations
             existing_hooks_resp = requests.get(hooks_url, headers=headers, timeout=10)
-            if existing_hooks_resp.ok:
-                for hook in existing_hooks_resp.json():
-                    if hook.get("config", {}).get("url") == webhook_url:
-                        return
+            if existing_hooks_resp.status_code == 401:
+                raise VaultAuthError(
+                    "Your GitHub token has expired or is invalid. Re-authenticate GitHub in the Vault."
+                )
+            if existing_hooks_resp.status_code in (403, 404):
+                raise ValueError(
+                    f"Cannot access webhooks for '{repo_name}'. Ensure the repo exists and you have admin access."
+                )
 
-            # 2. Register the new webhook
+            existing_hooks_resp.raise_for_status()
+            for hook in existing_hooks_resp.json():
+                if hook.get("config", {}).get("url") == webhook_url:
+                    return
+
             payload = {
                 "name": "web",
                 "active": True,
@@ -198,11 +235,21 @@ class GitHubExecutor(BaseExecutor):
                 },
             }
             resp = requests.post(hooks_url, headers=headers, json=payload, timeout=10)
+            if resp.status_code == 422:
+                # Hook already exists on GitHub
+                return
             resp.raise_for_status()
 
+        except VaultAuthError:
+            raise
         except requests.RequestException as e:
+            status_code = getattr(e.response, "status_code", None)
+            if status_code == 401:
+                raise VaultAuthError(
+                    "Your GitHub token has expired or is invalid. Re-authenticate GitHub in the Vault."
+                )
             raise ValueError(
-                f"Failed to register GitHub webhook. Check your repo name and permissions. Error: {str(e)}"
+                f"Could not register webhook on '{repo_name}'. Check repository permissions."
             )
 
     def match_ingress_event(

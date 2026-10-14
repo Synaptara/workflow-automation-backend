@@ -1,4 +1,5 @@
 import json
+import uuid
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
@@ -6,11 +7,17 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 
 class RunStatusConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        self.run_id = self.scope["url_route"]["kwargs"]["run_id"]
-        self.group_name = f"run_{self.run_id}"
-        user = self.scope["user"]
+        raw_run_id = self.scope["url_route"]["kwargs"].get("run_id", "")
+        try:
+            self.run_id = str(uuid.UUID(str(raw_run_id)))
+        except ValueError:
+            await self.close()
+            return
 
-        if not user.is_authenticated:
+        self.group_name = f"run_{self.run_id}"
+        user = self.scope.get("user")
+
+        if not user or not user.is_authenticated:
             await self.close()
             return
 
@@ -41,9 +48,9 @@ class UserNotificationConsumer(AsyncWebsocketConsumer):
     """Listens globally for events associated with the authenticated user."""
 
     async def connect(self):
-        user = self.scope["user"]
+        user = self.scope.get("user")
 
-        if not user.is_authenticated:
+        if not user or not user.is_authenticated:
             await self.close()
             return
 

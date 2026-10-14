@@ -14,6 +14,7 @@ from .condition import _resolve, evaluate_condition
 from .executors import EXECUTOR_REGISTRY
 from .executors.trello import poll_trello_new_cards
 from .models import (
+    Credential,
     Notification,
     StepRun,
     TaskUsage,
@@ -29,19 +30,58 @@ POLLING_HANDLERS = {
     "trello_new_card": poll_trello_new_cards,
 }
 
+NON_RETRYABLE_PATTERNS = (
+    "401",
+    "403",
+    "404",
+    "400",
+    "missing permissions",
+    "50013",
+    "vault",
+    "re-authenticate",
+    "not connected",
+    "expired",
+    "unsupported",
+    "invalid json",
+    "blocked",
+)
+
+
+def _is_non_retryable(exc: Exception) -> bool:
+    """Returns True if the error is a permanent configuration or auth issue that should not be retried."""
+    if isinstance(exc, ValueError):
+        return True
+    msg = str(exc).lower()
+    return any(pat in msg for pat in NON_RETRYABLE_PATTERNS)
+
+
+def _is_auth_failure(msg: str) -> bool:
+    lowered = msg.lower()
+    return any(
+        term in lowered
+        for term in (
+            "vault",
+            "re-authenticate",
+            "expired",
+            "401",
+            "unauthorized",
+            "not connected",
+            "50013",
+            "missing permissions",
+        )
+    )
+
 
 def _emit(run_id, user_id, event, data):
     layer = get_channel_layer()
     if layer is None:
         return
 
-    # Emit to the specific Run View (Workflow Builder canvas)
     async_to_sync(layer.group_send)(
         f"run_{run_id}",
         {"type": "run.event", "event": event, "data": data},
     )
 
-    # Emit to the Global User View (TopNav Bell Icon)
     async_to_sync(layer.group_send)(
         f"user_{user_id}",
         {"type": "notify.event", "event": event, "data": data},
@@ -58,7 +98,6 @@ def inject_variables(config, context):
         def replacer(match):
             path = match.group(1).strip()
             val = _resolve(path, context)
-            # HARDENED: Do not inject literal "None" strings if key is missing
             return str(val) if val not in (None, "") else ""
 
         return re.sub(r"\{\{\s*([^}]+)\s*\}\}", replacer, config)
@@ -74,24 +113,17 @@ def _run_action_step(run, step, context, max_attempts=3):
         {"step_id": str(step.id), "action_key": step.action_key},
     )
 
-    # Fetch the instance directly
     executor = EXECUTOR_REGISTRY.get(step.action_key)
     if not executor:
         raise RuntimeError(f"Executor {step.action_key} not found in registry.")
 
     last_exc = None
-
-    # Retrieve stored credentials if they exist
-    from .models import Credential
-
-    # CRITICAL FIX: Clean the frontend config by removing any empty strings ("")
-    # This prevents an empty input box on the canvas from overwriting a saved Vault key.
-    clean_step_config = {k: v for k, v in step.config.items() if v != ""}
+    clean_step_config = {k: v for k, v in (step.config or {}).items() if v != ""}
 
     try:
         cred = Credential.objects.get(owner=run.workflow.owner, service=step.action_key)
-        # The cleaned step config will only override the Vault data if the user actually typed something
-        merged_config = {**cred.data, **clean_step_config}
+        vault_data = cred.data if isinstance(cred.data, dict) else {}
+        merged_config = {**vault_data, **clean_step_config}
     except Credential.DoesNotExist:
         merged_config = clean_step_config
 
@@ -99,7 +131,6 @@ def _run_action_step(run, step, context, max_attempts=3):
 
     for attempt in range(1, max_attempts + 1):
         try:
-            # FIX: Pass step.app_event as the first argument so the executor knows which sub-action to run!
             output = executor.execute(step.app_event, dynamic_config, context)
 
             step_run.status = "success"
@@ -112,7 +143,6 @@ def _run_action_step(run, step, context, max_attempts=3):
             if step.client_id:
                 context[step.client_id] = step_run.output
 
-            # INCREMENT USAGE ALGORITHM: +1 Task for every successful action
             TaskUsage.objects.filter(user=run.workflow.owner).update(
                 count=F("count") + 1
             )
@@ -130,6 +160,11 @@ def _run_action_step(run, step, context, max_attempts=3):
             return
         except Exception as exc:
             last_exc = exc
+            if _is_non_retryable(exc):
+                logger.warning(
+                    "Step %s failed with non-retryable error: %s", step.id, exc
+                )
+                break
             logger.warning(
                 "Step %s attempt %d/%d failed: %s", step.id, attempt, max_attempts, exc
             )
@@ -146,9 +181,7 @@ def _run_action_step(run, step, context, max_attempts=3):
         "step_finished",
         {"step_id": str(step.id), "status": "failed", "error": str(last_exc)},
     )
-    raise RuntimeError(
-        f"Step {step.id} failed after {max_attempts} attempts: {last_exc}"
-    )
+    raise RuntimeError(str(last_exc))
 
 
 def _walk(run, step, context):
@@ -186,13 +219,33 @@ def _walk(run, step, context):
         _walk(run, child, context)
 
 
-# HARDENED: 120 second strict execution cutoff prevents hanging queues
 @shared_task(bind=True, max_retries=2, soft_time_limit=120)
 def run_workflow(self, run_id):
-    run = WorkflowRun.objects.select_related("workflow").get(id=run_id)
+    run = WorkflowRun.objects.select_related("workflow", "workflow__owner").get(
+        id=run_id
+    )
+    owner = run.workflow.owner
+
+    usage, _ = TaskUsage.objects.get_or_create(user=owner)
+    if usage.limit > 0 and usage.count >= usage.limit:
+        run.status = "failed"
+        run.finished_at = timezone.now()
+        run.save(update_fields=["status", "finished_at"])
+        notif = Notification.objects.create(
+            user=owner,
+            type="usage_warning",
+            title="Monthly task limit reached",
+            body=f"{run.workflow.name} was skipped because you reached {usage.count}/{usage.limit} tasks.",
+            link="/billing",
+            data={"run_id": str(run.id), "workflow_id": str(run.workflow.id)},
+        )
+        _emit(run.id, owner.id, "notification_created", {"id": str(notif.id)})
+        _emit(run.id, owner.id, "run_finished", {"status": "failed"})
+        return
+
     run.status = "running"
     run.save(update_fields=["status"])
-    _emit(run.id, run.workflow.owner.id, "run_started", {})
+    _emit(run.id, owner.id, "run_started", {})
 
     context = {"trigger": run.trigger_payload}
     root_steps = run.workflow.steps.filter(
@@ -218,29 +271,31 @@ def run_workflow(self, run_id):
         run.finished_at = timezone.now()
         run.save(update_fields=["status", "finished_at"])
 
-        # --- NEW NOTIFICATION CREATION LOGIC ---
         workflow_name = run.workflow.name or "Workflow"
         if run.status == "failed":
+            is_auth_err = _is_auth_failure(last_error_message)
             notif = Notification.objects.create(
-                user=run.workflow.owner,
-                type="run_failed",
-                title=f"{workflow_name} failed",
-                body=last_error_message[:200],  # Truncate long errors
-                link="/history",
+                user=owner,
+                type="integration_error" if is_auth_err else "run_failed",
+                title=(
+                    f"{workflow_name}: Connection required"
+                    if is_auth_err
+                    else f"{workflow_name} failed"
+                ),
+                body=last_error_message[:200],
+                link="/integrations" if is_auth_err else "/history",
                 data={"run_id": str(run.id), "workflow_id": str(run.workflow.id)},
             )
-            # Push live update to the UI bell icon!
             _emit(
                 run.id,
-                run.workflow.owner.id,
+                owner.id,
                 "notification_created",
                 {"id": str(notif.id)},
             )
 
         elif run.status == "success":
-            # (Optional) You can comment this out if you don't want a notification for every single success
             notif = Notification.objects.create(
-                user=run.workflow.owner,
+                user=owner,
                 type="run_success",
                 title=f"{workflow_name} completed",
                 body="All steps executed successfully.",
@@ -249,27 +304,27 @@ def run_workflow(self, run_id):
             )
             _emit(
                 run.id,
-                run.workflow.owner.id,
+                owner.id,
                 "notification_created",
                 {"id": str(notif.id)},
             )
-        # ---------------------------------------
 
-        _emit(run.id, run.workflow.owner.id, "run_finished", {"status": run.status})
+        _emit(run.id, owner.id, "run_finished", {"status": run.status})
 
 
 @shared_task
 def trigger_scheduled_workflow(workflow_id):
     """Fired autonomously by Celery Beat based on the user's schedule."""
-    from .models import Workflow
-
     try:
-        workflow = Workflow.objects.get(id=workflow_id, is_active=True)
-        # Create a run with a placeholder payload so {{trigger.source}} resolves
+        workflow = Workflow.objects.select_related("owner").get(
+            id=workflow_id, is_active=True
+        )
+        usage = TaskUsage.objects.filter(user=workflow.owner).first()
+        if usage and usage.limit > 0 and usage.count >= usage.limit:
+            return
         run = WorkflowRun.objects.create(
             workflow=workflow, trigger_payload={"source": "schedule"}
         )
-        # Kick off the main execution engine
         run_workflow.delay(str(run.id))
     except Workflow.DoesNotExist:
         pass
@@ -281,14 +336,22 @@ def poll_external_triggers():
     Scheduled via Celery Beat (e.g., every 60 seconds).
     Checks active polling workflows and dispatches runs for new items.
     """
-    polling_workflows = Workflow.objects.filter(
-        is_active=True,
-        steps__step_type="trigger",
-        steps__parent__isnull=True,
-        steps__action_key__in=POLLING_HANDLERS.keys(),
-    ).distinct()
+    polling_workflows = (
+        Workflow.objects.filter(
+            is_active=True,
+            steps__step_type="trigger",
+            steps__parent__isnull=True,
+            steps__action_key__in=POLLING_HANDLERS.keys(),
+        )
+        .select_related("owner")
+        .distinct()
+    )
 
     for workflow in polling_workflows:
+        usage = TaskUsage.objects.filter(user=workflow.owner).first()
+        if usage and usage.limit > 0 and usage.count >= usage.limit:
+            continue
+
         trigger_step = workflow.steps.filter(
             step_type="trigger", parent__isnull=True
         ).first()
@@ -325,7 +388,6 @@ def poll_external_triggers():
 def route_ingested_event(source, payload):
     """
     Asynchronous event router for high-volume platform webhooks and ingress listeners.
-    Evaluates trigger event criteria against memory-decrypted configs using Executor delegates.
     """
     event_type = payload.get("event_type", "new_message")
 
@@ -339,14 +401,12 @@ def route_ingested_event(source, payload):
     for step in trigger_steps:
         config = step.config or {}
 
-        # Pull the instance directly from the registry
         executor = EXECUTOR_REGISTRY.get(source)
-        if executor:
-            if hasattr(executor, "match_ingress_event"):
-                if not executor.match_ingress_event(
-                    step.app_event, event_type, payload, config
-                ):
-                    continue
+        if executor and hasattr(executor, "match_ingress_event"):
+            if not executor.match_ingress_event(
+                step.app_event, event_type, payload, config
+            ):
+                continue
 
         usage = TaskUsage.objects.filter(user=step.workflow.owner).first()
         if usage and usage.limit > 0 and usage.count >= usage.limit:

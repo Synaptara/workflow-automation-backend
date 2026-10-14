@@ -1,9 +1,11 @@
 import base64
 import hashlib
 import json
+import logging
 import uuid
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
+from decouple import config as env
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import models
@@ -11,13 +13,34 @@ from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 
-# Generate a reliable 32-byte Fernet key from Django's SECRET_KEY
-_key = base64.urlsafe_b64encode(hashlib.sha256(settings.SECRET_KEY.encode()).digest())
-_fernet = Fernet(_key)
+logger = logging.getLogger(__name__)
+
+
+def _build_fernet() -> MultiFernet:
+    """
+    Uses ENCRYPTION_KEY as the primary key if configured, while keeping
+    SECRET_KEY in the MultiFernet keyring so existing encrypted rows still decrypt.
+    """
+    keys = []
+    dedicated_secret = env("ENCRYPTION_KEY", default="").strip()
+    if dedicated_secret:
+        k1 = base64.urlsafe_b64encode(
+            hashlib.sha256(dedicated_secret.encode()).digest()
+        )
+        keys.append(Fernet(k1))
+
+    fallback_key = base64.urlsafe_b64encode(
+        hashlib.sha256(settings.SECRET_KEY.encode()).digest()
+    )
+    keys.append(Fernet(fallback_key))
+    return MultiFernet(keys)
+
+
+_fernet = _build_fernet()
 
 
 class EncryptedJSONField(models.TextField):
-    """Stores JSON dictionaries as AES-128 encrypted strings in the database."""
+    """Stores JSON dictionaries as AES-128 (Fernet) encrypted strings in the database."""
 
     def get_prep_value(self, value):
         if value is None:
@@ -32,11 +55,16 @@ class EncryptedJSONField(models.TextField):
         try:
             decrypted = _fernet.decrypt(value.encode("utf-8")).decode("utf-8")
             return json.loads(decrypted)
-        except Exception:
+        except InvalidToken:
             try:
                 return json.loads(value)
             except Exception:
+                logger.warning(
+                    "Failed to decrypt EncryptedJSONField value (key mismatch)."
+                )
                 return {}
+        except Exception:
+            return {}
 
     def to_python(self, value):
         if isinstance(value, (dict, list)) or value is None:
@@ -52,7 +80,7 @@ class TaskUsage(models.Model):
     )
     plan_type = models.CharField(max_length=20, default="free")
     count = models.PositiveIntegerField(default=0)
-    limit = models.PositiveIntegerField(default=1000)  # Default free tier limit
+    limit = models.PositiveIntegerField(default=1000)
 
     def __str__(self):
         return f"{self.user.username} Usage: {self.count}/{self.limit}"
@@ -84,7 +112,7 @@ class WorkflowStep(models.Model):
     )
     step_type = models.CharField(max_length=20, choices=STEP_TYPES)
     action_key = models.CharField(max_length=50, blank=True)
-    app_event = models.CharField(max_length=50, blank=True)  # <--- ADD THIS LINE
+    app_event = models.CharField(max_length=50, blank=True)
     config = EncryptedJSONField(default=dict, blank=True)
     parent = models.ForeignKey(
         "self", null=True, blank=True, on_delete=models.CASCADE, related_name="children"
@@ -164,13 +192,12 @@ def update_step_schedule(sender, instance, created, **kwargs):
 
         if instance.workflow.is_active:
             config_data = instance.config if isinstance(instance.config, dict) else {}
-            minutes = int(config_data.get("interval", 15))
+            minutes = max(1, int(config_data.get("interval") or 15))
 
             schedule, _ = IntervalSchedule.objects.get_or_create(
                 every=minutes, period=IntervalSchedule.MINUTES
             )
 
-            # Upsert the periodic task in the Celery clock
             PeriodicTask.objects.update_or_create(
                 name=task_name,
                 defaults={
@@ -181,7 +208,6 @@ def update_step_schedule(sender, instance, created, **kwargs):
                 },
             )
         else:
-            # If the workflow was paused, disable the clock tick
             PeriodicTask.objects.filter(name=task_name).update(enabled=False)
 
 
@@ -201,9 +227,6 @@ def toggle_workflow_schedule(sender, instance, **kwargs):
         PeriodicTask.objects.filter(name=task_name).update(enabled=False)
     else:
         PeriodicTask.objects.filter(name=task_name).update(enabled=True)
-
-
-# ... (existing imports and models remain unchanged) ...
 
 
 class Notification(models.Model):
