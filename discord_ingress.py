@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict
 
 import aiohttp
@@ -10,16 +11,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-INTERNAL_INGRESS = "http://web:8000/api/ingress/discord/"
-BASE_URL = (
-    os.getenv("BACKEND_INTERNAL_URL")
-    or os.getenv("BACKEND_URL")
-    or os.getenv("VITE_API_URL")
-)
+INGRESS_SECRET = os.getenv("INGRESS_SECRET", "")
 
-INGRESS_URL = (
-    f"{BASE_URL.rstrip('/')}/api/ingress/discord/" if BASE_URL else INTERNAL_INGRESS
-)
+# Automatically use internal Docker DNS when inside a container, or localhost in local dev
+IN_DOCKER = Path("/.dockerenv").exists()
+DEFAULT_BASE_URL = "http://web:8000" if IN_DOCKER else "http://127.0.0.1:8000"
+BASE_URL = os.getenv("BACKEND_INTERNAL_URL") or DEFAULT_BASE_URL
+INGRESS_URL = f"{BASE_URL.rstrip('/')}/api/ingress/discord/"
 
 # Setup Privileged Gateway Intents
 intents = discord.Intents.default()
@@ -37,7 +35,12 @@ class OrkfloDiscordIngress(discord.Client):
         """Fired automatically when the bot starts. Binds the HTTP session to the correct event loop."""
         connector = aiohttp.TCPConnector(limit=100, keepalive_timeout=30)
         timeout = aiohttp.ClientTimeout(total=5)
-        self.http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+        headers = {"Content-Type": "application/json"}
+        if INGRESS_SECRET:
+            headers["X-Ingress-Secret"] = INGRESS_SECRET
+        self.http_session = aiohttp.ClientSession(
+            connector=connector, timeout=timeout, headers=headers
+        )
 
     async def close(self):
         """Fired automatically on shutdown. Gracefully cleans up the HTTP session."""
@@ -75,13 +78,18 @@ async def dispatch_event(
                         flush=True,
                     )
                     return
+                elif response.status == 403:
+                    print(
+                        "❌ Ingress 403 Forbidden: Check that INGRESS_SECRET is set and matches in .env!",
+                        flush=True,
+                    )
+                    return
                 else:
                     body = await response.text()
                     print(
                         f"❌ Ingress rejected [{event_type}] ({response.status}): {body}",
                         flush=True,
                     )
-                    # Do not retry on 4xx client errors (e.g. malformed JSON)
                     if 400 <= response.status < 500:
                         return
 
@@ -97,7 +105,7 @@ async def dispatch_event(
             )
 
         if attempt < retries:
-            await asyncio.sleep(2**attempt)  # Exponential backoff: 2s, 4s, 8s
+            await asyncio.sleep(2**attempt)
 
     print(
         f"🛑 FATAL: Dropped event {event_id} after {retries} failed attempts.",
@@ -107,6 +115,11 @@ async def dispatch_event(
 
 @client.event
 async def on_ready():
+    if not INGRESS_SECRET:
+        print(
+            "⚠️ WARNING: INGRESS_SECRET is empty in .env! Django will reject events with 403.",
+            flush=True,
+        )
     print(f"🔥 Orkflo Discord Ingress Online | Logged in as {client.user}", flush=True)
     print(f"📡 Routing events to {INGRESS_URL}", flush=True)
 
@@ -160,5 +173,4 @@ if __name__ == "__main__":
         print("FATAL: DISCORD_BOT_TOKEN missing from environment.", flush=True)
         sys.exit(1)
 
-    # discord.py's client.run() automatically handles asyncio event loop setup and teardown
     client.run(TOKEN)

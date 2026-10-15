@@ -23,9 +23,7 @@ class DiscordExecutor(BaseExecutor):
             "DISCORD_BOT_TOKEN", default=None
         )
         if not token:
-            raise ValueError(
-                "DISCORD_BOT_TOKEN missing in both step configuration and backend environment."
-            )
+            raise ValueError("DISCORD_BOT_TOKEN missing in backend environment.")
         return token.strip()
 
     def _send_request(
@@ -58,13 +56,17 @@ class DiscordExecutor(BaseExecutor):
                 pass
 
             if resp.status_code == 401:
-                raise PermissionError("Discord Unauthorized: Invalid bot token.")
+                raise ValueError(
+                    "Discord authentication failed. Re-authenticate Discord in the Vault."
+                )
             elif resp.status_code == 403:
-                raise PermissionError(
-                    f"Discord Forbidden: Bot lacks necessary permissions. Details: {error_details}"
+                raise ValueError(
+                    f"Discord Forbidden: Make sure the Orkflo bot is invited to your server and has permission to view/post in this channel. ({error_details})"
                 )
             elif resp.status_code == 404:
-                raise FileNotFoundError(f"Discord Target Not Found: {error_details}")
+                raise ValueError(
+                    f"Discord channel or server not found. Check your Channel/Guild ID. ({error_details})"
+                )
             elif resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After", "unknown")
                 raise RuntimeError(
@@ -86,9 +88,9 @@ class DiscordExecutor(BaseExecutor):
         event = (app_event or "send_message").lower()
 
         if event == "send_message":
-            channel_id = step_config.get("channel_id")
+            channel_id = str(step_config.get("channel_id") or "").strip()
             if not channel_id:
-                raise ValueError("Discord send_message requires 'channel_id'.")
+                raise ValueError("Discord Send Message requires a Channel ID.")
 
             content = step_config.get("content", "")
             title = step_config.get("embed_title", "")
@@ -114,9 +116,7 @@ class DiscordExecutor(BaseExecutor):
                 ]
 
             if not payload:
-                raise ValueError(
-                    "Discord send_message payload cannot be empty (requires content or embed)."
-                )
+                raise ValueError("Discord message content cannot be empty.")
 
             res = self._send_request(
                 "POST", f"/channels/{channel_id}/messages", token, payload
@@ -129,35 +129,32 @@ class DiscordExecutor(BaseExecutor):
             }
 
         elif event == "create_channel":
-            guild_id = step_config.get("guild_id")
-            channel_name = step_config.get("channel_name")
-            private_user_id = step_config.get("private_user_id")
+            guild_id = str(step_config.get("guild_id") or "").strip()
+            channel_name = str(step_config.get("channel_name") or "").strip()
+            private_user_id = str(step_config.get("private_user_id") or "").strip()
 
             if not guild_id or not channel_name:
                 raise ValueError(
-                    "Discord create_channel requires both 'guild_id' and 'channel_name'."
+                    "Discord Create Channel requires both a Server (Guild) ID and Channel Name."
                 )
 
-            channel_type = int(step_config.get("channel_type", 0))  # 0 = GUILD_TEXT
+            channel_type = int(step_config.get("channel_type", 0))
             payload = {
-                "name": str(channel_name).strip().replace(" ", "-").lower(),
+                "name": channel_name.replace(" ", "-").lower(),
                 "type": channel_type,
             }
 
-            # Inject Private Permissions if a user ID is mapped
             if private_user_id:
                 payload["permission_overwrites"] = [
                     {
-                        "id": str(
-                            guild_id
-                        ),  # The @everyone role shares the exact ID of the Guild
-                        "type": 0,  # 0 = role
-                        "deny": "1024",  # Deny VIEW_CHANNEL (0x400)
+                        "id": guild_id,
+                        "type": 0,
+                        "deny": "1024",
                     },
                     {
-                        "id": str(private_user_id),
-                        "type": 1,  # 1 = member
-                        "allow": "1024",  # Allow VIEW_CHANNEL (0x400)
+                        "id": private_user_id,
+                        "type": 1,
+                        "allow": "1024",
                     },
                 ]
 
@@ -173,12 +170,12 @@ class DiscordExecutor(BaseExecutor):
             }
 
         elif event == "add_role":
-            guild_id = step_config.get("guild_id")
-            user_id = step_config.get("user_id")
-            role_id = step_config.get("role_id")
+            guild_id = str(step_config.get("guild_id") or "").strip()
+            user_id = str(step_config.get("user_id") or "").strip()
+            role_id = str(step_config.get("role_id") or "").strip()
             if not all([guild_id, user_id, role_id]):
                 raise ValueError(
-                    "Discord add_role requires 'guild_id', 'user_id', and 'role_id'."
+                    "Discord Assign Role requires Server ID, Target User ID, and Role ID."
                 )
 
             self._send_request(
@@ -186,18 +183,18 @@ class DiscordExecutor(BaseExecutor):
             )
             return {
                 "assigned": True,
-                "user_id": str(user_id),
-                "role_id": str(role_id),
-                "guild_id": str(guild_id),
+                "user_id": user_id,
+                "role_id": role_id,
+                "guild_id": guild_id,
             }
 
         elif event == "remove_role":
-            guild_id = step_config.get("guild_id")
-            user_id = step_config.get("user_id")
-            role_id = step_config.get("role_id")
+            guild_id = str(step_config.get("guild_id") or "").strip()
+            user_id = str(step_config.get("user_id") or "").strip()
+            role_id = str(step_config.get("role_id") or "").strip()
             if not all([guild_id, user_id, role_id]):
                 raise ValueError(
-                    "Discord remove_role requires 'guild_id', 'user_id', and 'role_id'."
+                    "Discord Remove Role requires Server ID, Target User ID, and Role ID."
                 )
 
             self._send_request(
@@ -205,9 +202,9 @@ class DiscordExecutor(BaseExecutor):
             )
             return {
                 "removed": True,
-                "user_id": str(user_id),
-                "role_id": str(role_id),
-                "guild_id": str(guild_id),
+                "user_id": user_id,
+                "role_id": role_id,
+                "guild_id": guild_id,
             }
 
         else:
@@ -216,21 +213,23 @@ class DiscordExecutor(BaseExecutor):
     def fetch_test_data(
         self, app_event: str, step_config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Fetches live data from Discord for the UI to use as step variables.
-        """
         token = self._resolve_token(step_config)
 
         if app_event == "member_join":
-            guild_id = step_config.get("guild_id")
+            guild_id = str(step_config.get("guild_id") or "").strip()
             if not guild_id:
-                raise ValueError("Server (Guild) ID is required to fetch members.")
+                raise ValueError("Enter a Server (Guild) ID first to load sample data.")
 
             res = self._send_request(
                 "GET", f"/guilds/{guild_id}/members?limit=1", token
             )
-            if not res or not isinstance(res, list) or len(res) == 0:
-                raise ValueError("No members found in this server.")
+            if not res or not isinstance(res, list):
+                return {
+                    "event_type": "member_join",
+                    "author_id": "1160188996488544306",
+                    "author_name": "new_member",
+                    "guild_id": guild_id,
+                }
 
             member = res[0]
             user = member.get("user", {})
@@ -238,22 +237,22 @@ class DiscordExecutor(BaseExecutor):
                 "event_type": "member_join",
                 "author_id": user.get("id"),
                 "author_name": user.get("username"),
-                "guild_id": str(guild_id),
+                "guild_id": guild_id,
                 "created_at": member.get("joined_at"),
             }
 
         elif app_event == "new_message":
-            channel_id = step_config.get("channel_id")
+            channel_id = str(step_config.get("channel_id") or "").strip()
             if not channel_id:
-                raise ValueError("Channel ID is required to fetch test messages.")
+                raise ValueError("Enter a Channel ID first to load sample messages.")
 
             res = self._send_request(
                 "GET", f"/channels/{channel_id}/messages?limit=1", token
             )
-            if not res or not isinstance(res, list) or len(res) == 0:
+            if not res or not isinstance(res, list):
                 return {
                     "event_type": "new_message",
-                    "channel_id": str(channel_id),
+                    "channel_id": channel_id,
                     "author_id": "123456789",
                     "author_name": "sample_user",
                     "content": "Sample message for workflow testing",

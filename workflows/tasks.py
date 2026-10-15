@@ -110,7 +110,11 @@ def _run_action_step(run, step, context, max_attempts=3):
         run.id,
         run.workflow.owner.id,
         "step_started",
-        {"step_id": str(step.id), "action_key": step.action_key},
+        {
+            "step_id": str(step.id),
+            "client_id": step.client_id,
+            "action_key": step.action_key,
+        },
     )
 
     executor = EXECUTOR_REGISTRY.get(step.action_key)
@@ -153,6 +157,7 @@ def _run_action_step(run, step, context, max_attempts=3):
                 "step_finished",
                 {
                     "step_id": str(step.id),
+                    "client_id": step.client_id,
                     "status": "success",
                     "output": step_run.output,
                 },
@@ -179,7 +184,12 @@ def _run_action_step(run, step, context, max_attempts=3):
         run.id,
         run.workflow.owner.id,
         "step_finished",
-        {"step_id": str(step.id), "status": "failed", "error": str(last_exc)},
+        {
+            "step_id": str(step.id),
+            "client_id": step.client_id,
+            "status": "failed",
+            "error": str(last_exc),
+        },
     )
     raise RuntimeError(str(last_exc))
 
@@ -201,7 +211,11 @@ def _walk(run, step, context):
                 run.id,
                 run.workflow.owner.id,
                 "condition_evaluated",
-                {"step_id": str(step.id), "result": result},
+                {
+                    "step_id": str(step.id),
+                    "client_id": step.client_id,
+                    "result": result,
+                },
             )
             children = step.children.filter(branch=branch).order_by("order")
         except Exception as exc:
