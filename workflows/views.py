@@ -69,8 +69,12 @@ class RegisterView(generics.CreateAPIView):
     throttle_classes = [AnonRateThrottle]
 
     def create(self, request, *args, **kwargs):
-        email = request.data.get("email")
-        submitted_otp = request.data.get("otp")
+        # QA-09 FIX: Validate username, email, and password fields FIRST
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data.get("email")
+        submitted_otp = str(request.data.get("otp") or "").strip()
 
         if not submitted_otp:
             return Response(
@@ -84,7 +88,11 @@ class RegisterView(generics.CreateAPIView):
             )
 
         cache.delete(f"otp_{email}")
-        response = super().create(request, *args, **kwargs)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        response = Response(
+            serializer.data, status=status.HTTP_201_CREATED, headers=headers
+        )
 
         user = User.objects.get(email=email)
         TaskUsage.objects.get_or_create(user=user, defaults={"plan_type": "free"})
@@ -614,24 +622,56 @@ class WebhookTriggerView(APIView):
 
 class SendOTPView(APIView):
     permission_classes = [permissions.AllowAny]
-    throttle_classes = [AnonRateThrottle]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "otp"
 
     def post(self, request):
-        email = request.data.get("email")
+        from django.core.exceptions import ValidationError
+        from django.core.validators import validate_email
+
+        email = str(request.data.get("email") or "").strip().lower()
         if not email:
             return Response(
                 {"error": "Email is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if User.objects.filter(email=email).exists():
+        try:
+            validate_email(email)
+        except ValidationError:
+            return Response(
+                {"error": "Enter a valid email address"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if User.objects.filter(email__iexact=email).exists():
             return Response(
                 {"error": "Email already registered"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # QA-07 FIX: Per-email 60s cooldown + 5/hour cap in Redis to stop mail-bombing
+        cooldown_key = f"otp_cooldown_{email}"
+        hourly_key = f"otp_hourly_{email}"
+        if cache.get(cooldown_key):
+            return Response(
+                {"error": "Please wait 60 seconds before requesting another code."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        sent_count = cache.get(hourly_key, 0)
+        if sent_count >= 5:
+            return Response(
+                {
+                    "error": "Too many OTP requests for this email. Try again in an hour."
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         otp = str(random.randint(100000, 999999))
         cache.set(f"otp_{email}", otp, timeout=600)
+        cache.set(cooldown_key, True, timeout=60)
+        cache.set(hourly_key, sent_count + 1, timeout=3600)
 
         send_mail(
             "Verify your Orkflo account",
@@ -705,6 +745,9 @@ class SecureLoginView(TokenObtainPairView):
 
 
 class SecureRefreshView(TokenRefreshView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "token_refresh"
+
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get("refresh_token")
 

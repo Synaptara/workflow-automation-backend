@@ -91,7 +91,9 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.ScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        "anon": "5/minute",  # Stops credential stuffing and OTP spam
+        "anon": "5/minute",  # Stops credential stuffing
+        "otp": "3/minute",  # Strict IP cap on OTP generation
+        "token_refresh": "30/minute",  # Prevents multi-tab 429 logouts (QA-06)
         "webhook": "60/minute",
     },
 }
