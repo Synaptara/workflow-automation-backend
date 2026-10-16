@@ -1,0 +1,47 @@
+```yaml
+name: Orkflo Guardian
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 3 * * *" # Daily at 9 AM IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Security and Code Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install audit tools
+        run: pip install bandit pip-audit ruff
+
+      - name: Scan Python security issues
+        run: bandit -r . -ll -ii --exclude ./.git,./venv,./.venv
+        continue-on-error: true
+
+      - name: Check Python code quality
+        run: ruff check . --output-format=github
+        continue-on-error: true
+
+      - name: Check vulnerable Python dependencies
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          else
+            echo "requirements.txt not found at repository root"
+          fi
+        continue-on-error: true
+```
