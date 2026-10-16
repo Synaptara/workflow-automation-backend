@@ -12,12 +12,14 @@ permissions:
 
 jobs:
   audit:
-    name: Security and Code Audit
+    name: Security and AI Code Audit
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,7 +34,7 @@ jobs:
         continue-on-error: true
         run: |
           bandit -r . -ll -ii \
-            --exclude ./.git,./venv,./.venv \
+            --exclude ./.git,./venv,./.venv,./.github \
             -f txt -o bandit-report.txt
           cat bandit-report.txt
 
@@ -49,7 +51,27 @@ jobs:
             pip-audit -r requirements.txt
           else
             echo "requirements.txt not found at repository root"
+            exit 1
           fi
+
+      - name: Run AI code review
+        id: ai_review
+        continue-on-error: true
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python .github/scripts/ai_review.py
+
+      - name: Upload AI review report
+        if: always() && hashFiles('ai-review.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: orkflo-guardian-ai-review
+          path: ai-review.md
+          retention-days: 14
 
       - name: Generate audit summary
         if: always()
@@ -57,6 +79,7 @@ jobs:
           BANDIT_STATUS: ${{ steps.bandit.outcome }}
           RUFF_STATUS: ${{ steps.ruff.outcome }}
           DEPENDENCY_STATUS: ${{ steps.dependencies.outcome }}
+          AI_STATUS: ${{ steps.ai_review.outcome }}
         run: |
           {
             echo "## Orkflo Guardian Audit"
@@ -66,8 +89,16 @@ jobs:
             echo "| Bandit security scan | $BANDIT_STATUS |"
             echo "| Ruff code quality | $RUFF_STATUS |"
             echo "| Dependency audit | $DEPENDENCY_STATUS |"
+            echo "| AI code review | $AI_STATUS |"
             echo ""
-            echo "Review the logs above for detailed findings."
+            echo "### AI Review Findings"
+            echo ""
+
+            if [ -f ai-review.md ]; then
+              cat ai-review.md
+            else
+              echo "AI review report was not generated."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Notify Discord
@@ -77,6 +108,7 @@ jobs:
           BANDIT_STATUS: ${{ steps.bandit.outcome }}
           RUFF_STATUS: ${{ steps.ruff.outcome }}
           DEPENDENCY_STATUS: ${{ steps.dependencies.outcome }}
+          AI_STATUS: ${{ steps.ai_review.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
@@ -93,6 +125,7 @@ jobs:
           Bandit: $BANDIT_STATUS
           Ruff: $RUFF_STATUS
           Dependencies: $DEPENDENCY_STATUS
+          AI Review: $AI_STATUS
 
           Full report: $RUN_URL
           EOF
