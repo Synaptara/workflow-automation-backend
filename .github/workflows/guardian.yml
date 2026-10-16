@@ -25,21 +25,85 @@ jobs:
           python-version: "3.13"
 
       - name: Install audit tools
-        run: pip install bandit pip-audit ruff
+        run: python -m pip install bandit pip-audit ruff
 
       - name: Scan Python security issues
-        run: bandit -r . -ll -ii --exclude ./.git,./venv,./.venv
+        id: bandit
         continue-on-error: true
+        run: |
+          bandit -r . -ll -ii \
+            --exclude ./.git,./venv,./.venv \
+            -f txt -o bandit-report.txt
+          cat bandit-report.txt
 
       - name: Check Python code quality
-        run: ruff check . --output-format=github
+        id: ruff
         continue-on-error: true
+        run: ruff check . --output-format=github
 
-      - name: Check vulnerable Python dependencies
+      - name: Check vulnerable dependencies
+        id: dependencies
+        continue-on-error: true
         run: |
           if [ -f requirements.txt ]; then
             pip-audit -r requirements.txt
           else
             echo "requirements.txt not found at repository root"
           fi
-        continue-on-error: true
+
+      - name: Generate audit summary
+        if: always()
+        env:
+          BANDIT_STATUS: ${{ steps.bandit.outcome }}
+          RUFF_STATUS: ${{ steps.ruff.outcome }}
+          DEPENDENCY_STATUS: ${{ steps.dependencies.outcome }}
+        run: |
+          {
+            echo "## Orkflo Guardian Audit"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Bandit security scan | $BANDIT_STATUS |"
+            echo "| Ruff code quality | $RUFF_STATUS |"
+            echo "| Dependency audit | $DEPENDENCY_STATUS |"
+            echo ""
+            echo "Review the logs above for detailed findings."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          BANDIT_STATUS: ${{ steps.bandit.outcome }}
+          RUFF_STATUS: ${{ steps.ruff.outcome }}
+          DEPENDENCY_STATUS: ${{ steps.dependencies.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Discord webhook not configured. Skipping notification."
+            exit 0
+          fi
+
+          MESSAGE=$(cat <<EOF
+          🛡️ Orkflo Guardian Audit
+
+          Repository: ${{ github.repository }}
+          Trigger: ${{ github.event_name }}
+
+          Bandit: $BANDIT_STATUS
+          Ruff: $RUFF_STATUS
+          Dependencies: $DEPENDENCY_STATUS
+
+          Full report: $RUN_URL
+          EOF
+          )
+
+          jq -n --arg content "$MESSAGE" \
+            '{content: $content}' > discord-payload.json
+
+          curl --fail-with-body --silent --show-error \
+            --retry 2 \
+            -H "Content-Type: application/json" \
+            -X POST \
+            --data @discord-payload.json \
+            "$DISCORD_WEBHOOK_URL"
