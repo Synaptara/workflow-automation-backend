@@ -1,0 +1,142 @@
+name: Orkflo Guardian
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 3 * * *" # Daily at 9 AM IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Security and AI Code Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install audit tools
+        run: python -m pip install bandit pip-audit ruff
+
+      - name: Scan Python security issues
+        id: bandit
+        continue-on-error: true
+        run: |
+          bandit -r . -ll -ii \
+            --exclude ./.git,./venv,./.venv,./.github \
+            -f txt -o bandit-report.txt
+          cat bandit-report.txt
+
+      - name: Check Python code quality
+        id: ruff
+        continue-on-error: true
+        run: ruff check . --output-format=github
+
+      - name: Check vulnerable dependencies
+        id: dependencies
+        continue-on-error: true
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt
+          else
+            echo "requirements.txt not found at repository root"
+            exit 1
+          fi
+
+      - name: Run AI code review
+        id: ai_review
+        continue-on-error: true
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python .github/scripts/ai_review.py
+
+      - name: Upload AI review report
+        if: always() && hashFiles('ai-review.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: orkflo-guardian-ai-review
+          path: ai-review.md
+          retention-days: 14
+
+      - name: Generate audit summary
+        if: always()
+        env:
+          BANDIT_STATUS: ${{ steps.bandit.outcome }}
+          RUFF_STATUS: ${{ steps.ruff.outcome }}
+          DEPENDENCY_STATUS: ${{ steps.dependencies.outcome }}
+          AI_STATUS: ${{ steps.ai_review.outcome }}
+        run: |
+          {
+            echo "## Orkflo Guardian Audit"
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Bandit security scan | $BANDIT_STATUS |"
+            echo "| Ruff code quality | $RUFF_STATUS |"
+            echo "| Dependency audit | $DEPENDENCY_STATUS |"
+            echo "| AI code review | $AI_STATUS |"
+            echo ""
+            echo "### AI Review Findings"
+            echo ""
+
+            if [ -f ai-review.md ]; then
+              cat ai-review.md
+            else
+              echo "AI review report was not generated."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          BANDIT_STATUS: ${{ steps.bandit.outcome }}
+          RUFF_STATUS: ${{ steps.ruff.outcome }}
+          DEPENDENCY_STATUS: ${{ steps.dependencies.outcome }}
+          AI_STATUS: ${{ steps.ai_review.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "Discord webhook not configured. Skipping notification."
+            exit 0
+          fi
+
+          MESSAGE=$(cat <<EOF
+          🛡️ Orkflo Guardian Audit
+
+          Repository: ${{ github.repository }}
+          Trigger: ${{ github.event_name }}
+
+          Bandit: $BANDIT_STATUS
+          Ruff: $RUFF_STATUS
+          Dependencies: $DEPENDENCY_STATUS
+          AI Review: $AI_STATUS
+
+          Full report: $RUN_URL
+          EOF
+          )
+
+          jq -n --arg content "$MESSAGE" \
+            '{content: $content}' > discord-payload.json
+
+          curl --fail-with-body --silent --show-error \
+            --retry 2 \
+            -H "Content-Type: application/json" \
+            -X POST \
+            --data @discord-payload.json \
+            "$DISCORD_WEBHOOK_URL"
