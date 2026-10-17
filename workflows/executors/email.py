@@ -34,7 +34,14 @@ class EmailExecutor(BaseExecutor):
         subject = " ".join(
             str(step_config.get("subject") or "Orkflo Automation").split()
         )[:200]
-        body = str(step_config.get("body") or "")
+
+        raw_body = str(step_config.get("body") or "")
+
+        # Enforce accountability by injecting the verified sender's email
+        owner_email = context.get("_system", {}).get("owner_email", "Unknown User")
+        footer = f"\n\n---\nThis is an automated email sent via Orkflo on behalf of verified user: {owner_email}"
+
+        body = raw_body + footer
 
         try:
             msg = EmailMessage(

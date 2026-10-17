@@ -615,6 +615,13 @@ class WebhookTriggerView(APIView):
             if hasattr(executor, "normalize_payload"):
                 payload = executor.normalize_payload(trigger_step.app_event, payload)
 
+                # If the normalizer returns None, it means the event should be ignored (e.g. issue edited instead of opened)
+                if payload is None:
+                    return Response(
+                        {"status": "ignored", "reason": "event_type_mismatch"},
+                        status=status.HTTP_200_OK,
+                    )
+
         run = WorkflowRun.objects.create(workflow=workflow, trigger_payload=payload)
         run_workflow.delay(str(run.id))
         return Response({"run_id": str(run.id)}, status=status.HTTP_202_ACCEPTED)

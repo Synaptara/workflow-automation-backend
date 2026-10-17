@@ -174,6 +174,10 @@ class GitHubExecutor(BaseExecutor):
 
     def normalize_payload(self, app_event: str, raw_payload: dict) -> dict:
         if app_event == "new_issue":
+            # ONLY process brand new issues. Drop edits, closes, labels, and GitHub 'ping' events.
+            if raw_payload.get("action") != "opened":
+                return None
+
             issue = raw_payload.get("issue", {})
             repo = raw_payload.get("repository", {})
             user = issue.get("user", {})

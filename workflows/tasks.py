@@ -261,7 +261,14 @@ def run_workflow(self, run_id):
     run.save(update_fields=["status"])
     _emit(run.id, owner.id, "run_started", {})
 
-    context = {"trigger": run.trigger_payload}
+    # Inject the verified owner's email silently into the system context
+    context = {
+        "trigger": run.trigger_payload,
+        "_system": {
+            "owner_email": owner.email,
+            "owner_username": owner.username,
+        },
+    }
     root_steps = run.workflow.steps.filter(
         step_type="trigger", parent__isnull=True
     ).order_by("order")
@@ -298,22 +305,6 @@ def run_workflow(self, run_id):
                 ),
                 body=last_error_message[:200],
                 link="/integrations" if is_auth_err else "/history",
-                data={"run_id": str(run.id), "workflow_id": str(run.workflow.id)},
-            )
-            _emit(
-                run.id,
-                owner.id,
-                "notification_created",
-                {"id": str(notif.id)},
-            )
-
-        elif run.status == "success":
-            notif = Notification.objects.create(
-                user=owner,
-                type="run_success",
-                title=f"{workflow_name} completed",
-                body="All steps executed successfully.",
-                link="/history",
                 data={"run_id": str(run.id), "workflow_id": str(run.workflow.id)},
             )
             _emit(

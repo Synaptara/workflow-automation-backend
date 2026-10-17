@@ -12,7 +12,7 @@ class TrelloExecutor(BaseExecutor):
     """config: {"key": str, "token": str, "list_id": str, "name_template": str, "desc_template": str}
     key/token can also be pulled from a stored Credential and merged in before calling execute()."""
 
-    def execute(self, config: dict, context: dict) -> dict:
+    def execute(self, app_event: str, config: dict, context: dict) -> dict:
         name = (
             config.get("name_template", "New card").format(**context)
             if "{" in config.get("name_template", "")

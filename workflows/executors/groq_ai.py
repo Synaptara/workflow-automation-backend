@@ -17,7 +17,7 @@ DEPRECATED_MODELS = {
 
 @register("groq_ai")
 class GroqAIExecutor(BaseExecutor):
-    def execute(self, config: dict, context: dict) -> dict:
+    def execute(self, app_event: str, config: dict, context: dict) -> dict:
         api_key = config.get("api_key")
         prompt = config.get("prompt")
 
