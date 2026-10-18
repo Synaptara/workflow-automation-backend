@@ -54,11 +54,9 @@ class WorkflowSerializer(serializers.ModelSerializer):
             "name",
             "is_active",
             "created_at",
-            "webhook_secret",
             "webhook_url",
             "steps",
         ]
-        read_only_fields = ["webhook_secret"]
 
     def get_webhook_url(self, obj):
         return f"/api/hooks/{obj.id}/{obj.webhook_secret}/"

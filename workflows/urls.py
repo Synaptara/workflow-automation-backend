@@ -3,7 +3,9 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from .views import (
+    CheckoutSessionView,  # NEW
     CredentialViewSet,
+    DodoWebhookView,  # NEW
     GlobalRunHistoryView,
     IntegrationOAuthView,
     LogoutView,
@@ -18,6 +20,7 @@ from .views import (
     TestTriggerView,
     UniversalIngressView,
     WebhookTriggerView,
+    WebSocketTicketView,
     WorkflowViewSet,
 )
 
@@ -30,21 +33,19 @@ urlpatterns = [
     path("auth/register/", RegisterView.as_view()),
     path("auth/login/", SecureLoginView.as_view()),
     path("auth/refresh/", SecureRefreshView.as_view()),
+    path("auth/ws-ticket/", WebSocketTicketView.as_view(), name="ws-ticket"),
     path("auth/social/<str:provider>/", SocialAuthView.as_view()),
     path("credentials/oauth/<str:provider>/", IntegrationOAuthView.as_view()),
-    # Primary internal and external webhook endpoint
     path(
         "webhooks/<uuid:workflow_id>/<str:secret>/",
         WebhookTriggerView.as_view(),
         name="webhook_trigger",
     ),
-    # ALIAS: Support for legacy frontend UI test requests
     path(
         "hooks/<uuid:workflow_id>/<str:secret>/",
         WebhookTriggerView.as_view(),
         name="webhook_trigger_alias",
     ),
-    # 2. Wire the Ingestion Engine here
     path(
         "ingress/<str:source>/",
         UniversalIngressView.as_view(),
@@ -56,4 +57,7 @@ urlpatterns = [
     path("auth/logout/", LogoutView.as_view()),
     path("usage/", TaskUsageView.as_view()),
     path("test-trigger/", TestTriggerView.as_view(), name="test-trigger"),
+    # --- BILLING ENDPOINTS ---
+    path("billing/checkout/", CheckoutSessionView.as_view(), name="checkout_session"),
+    path("billing/webhook/", DodoWebhookView.as_view(), name="dodo_webhook"),
 ] + router.urls

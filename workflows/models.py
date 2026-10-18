@@ -237,6 +237,7 @@ class Notification(models.Model):
         ("run_success", "Run Success"),
         ("usage_warning", "Usage Warning"),
         ("integration_error", "Integration Error"),
+        ("product", "Product Update"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -286,3 +287,32 @@ class AnnouncementRead(models.Model):
 
     class Meta:
         unique_together = ("user", "announcement")
+
+
+class UserProfile(models.Model):
+    AUTH_PROVIDER_CHOICES = [
+        ("credentials", "Email/Password"),
+        ("google", "Google OAuth"),
+        ("github", "GitHub OAuth"),
+    ]
+
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="profile"
+    )
+    auth_provider = models.CharField(
+        max_length=50,
+        default="credentials",
+        choices=AUTH_PROVIDER_CHOICES,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} ({self.auth_provider})"
+
+
+@receiver(post_save, sender=User)
+def create_user_profile(sender, instance, created, **kwargs):
+    if created:
+        UserProfile.objects.get_or_create(
+            user=instance, defaults={"auth_provider": "credentials"}
+        )

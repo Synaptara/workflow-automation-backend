@@ -60,3 +60,4 @@ zope.interface==8.6
 aiohttp
 discord.py
 python-dotenv
+dodopayments[webhooks]==1.121.0

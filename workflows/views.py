@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import random
+import secrets
 
 import requests
 from decouple import config
@@ -10,8 +11,9 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.mail import send_mail
-from django.db import transaction
+from django.db import models, transaction
 from django.db.models import Prefetch
+from dodopayments import DodoPayments
 from rest_framework import generics, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
@@ -29,6 +31,7 @@ from .models import (
     Credential,
     Notification,
     TaskUsage,
+    UserProfile,
     Workflow,
     WorkflowRun,
     WorkflowStep,
@@ -95,6 +98,9 @@ class RegisterView(generics.CreateAPIView):
         )
 
         user = User.objects.get(email=email)
+        UserProfile.objects.get_or_create(
+            user=user, defaults={"auth_provider": "credentials"}
+        )
         TaskUsage.objects.get_or_create(user=user, defaults={"plan_type": "free"})
 
         return response
@@ -208,6 +214,15 @@ class SocialAuthView(APIView):
                 counter += 1
 
             user = User.objects.create_user(username=username, email=email)
+            user.set_unusable_password()
+            user.save(update_fields=["password"])
+            UserProfile.objects.update_or_create(
+                user=user, defaults={"auth_provider": provider}
+            )
+        else:
+            UserProfile.objects.get_or_create(
+                user=user, defaults={"auth_provider": provider}
+            )
 
         TaskUsage.objects.get_or_create(user=user, defaults={"plan_type": "free"})
 
@@ -735,6 +750,32 @@ class SecureLoginView(TokenObtainPairView):
     throttle_classes = [AnonRateThrottle]
 
     def post(self, request, *args, **kwargs):
+        username = request.data.get("username")
+        if username:
+            user = (
+                User.objects.filter(
+                    models.Q(username=username) | models.Q(email=username)
+                )
+                .select_related("profile")
+                .first()
+            )
+            if user:
+                profile = getattr(user, "profile", None)
+                if profile and profile.auth_provider != "credentials":
+                    return Response(
+                        {
+                            "detail": f"This account is configured for {profile.auth_provider.capitalize()} login. Please sign in with {profile.auth_provider.capitalize()}."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if not user.has_usable_password():
+                    return Response(
+                        {
+                            "detail": "Password login is disabled for this account. Please sign in using your OAuth provider."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
         response = super().post(request, *args, **kwargs)
         refresh_token = response.data.get("refresh")
 
@@ -749,6 +790,20 @@ class SecureLoginView(TokenObtainPairView):
                 samesite="None" if not settings.DEBUG else "Lax",
             )
         return response
+
+
+class WebSocketTicketView(APIView):
+    """
+    Issues a short-lived, single-use ticket for WebSocket authentication.
+    Prevents passing long-lived JWT access tokens in query parameters/logs.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        ticket = secrets.token_urlsafe(32)
+        cache.set(f"ws_ticket:{ticket}", request.user.id, timeout=60)
+        return Response({"ticket": ticket}, status=status.HTTP_200_OK)
 
 
 class SecureRefreshView(TokenRefreshView):
@@ -960,3 +1015,232 @@ class LogoutView(APIView):
             "refresh_token", samesite="None" if not settings.DEBUG else "Lax"
         )
         return res
+
+
+def _get_dodo_client() -> DodoPayments:
+    api_key = config("DODO_API_KEY", default="").strip()
+    default_env = "test_mode" if settings.DEBUG else "live_mode"
+    env_mode = config("DODO_ENVIRONMENT", default=default_env).strip()
+    if env_mode not in ("test_mode", "live_mode"):
+        env_mode = default_env
+    return DodoPayments(bearer_token=api_key, environment=env_mode)
+
+
+class CheckoutSessionView(APIView):
+    """Generates a secure Dodo Payments Checkout Session URL for the Pro tier."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        plan_id = request.data.get("plan_id")
+        if plan_id != "pro":
+            return Response(
+                {"detail": "Invalid plan ID."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        api_key = config("DODO_API_KEY", default="").strip()
+        product_id = config("DODO_PRO_PRODUCT_ID", default="").strip()
+        if not api_key or not product_id:
+            return Response(
+                {"detail": "Billing is not configured on this server."},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+
+        frontend_url = config("FRONTEND_URL", default="http://localhost:5173").rstrip(
+            "/"
+        )
+
+        try:
+            client = _get_dodo_client()
+            session = client.checkout_sessions.create(
+                product_cart=[{"product_id": product_id, "quantity": 1}],
+                customer={
+                    "email": request.user.email,
+                    "name": request.user.username,
+                },
+                return_url=f"{frontend_url}/billing?checkout=success",
+                metadata={
+                    "user_id": str(request.user.id),
+                    "plan_id": "pro",
+                },
+            )
+
+            checkout_url = getattr(session, "checkout_url", None) or getattr(
+                session, "payment_link", None
+            )
+            if not checkout_url:
+                raise ValueError("Dodo SDK did not return a checkout_url.")
+
+            return Response(
+                {
+                    "checkout_url": checkout_url,
+                    "session_id": getattr(session, "session_id", ""),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.exception("Dodo Checkout Session creation failed: %s", e)
+            return Response(
+                {"detail": "Failed to create checkout session with payment provider."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+
+class DodoWebhookView(APIView):
+    """
+    Verifies Standard Webhooks via Dodo SDK (`webhooks.unwrap`), enforces idempotency,
+    and manages subscription lifecycle (active/renewed, on_hold/failed grace period,
+    canceled/expired/refunded).
+    """
+
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = []
+
+    def post(self, request):
+        webhook_secret = config("DODO_WEBHOOK_SECRET", default="").strip()
+        if not webhook_secret:
+            return Response(status=status.HTTP_501_NOT_IMPLEMENTED)
+
+        webhook_id = request.headers.get("webhook-id", "")
+        webhook_sig = request.headers.get("webhook-signature", "")
+        webhook_ts = request.headers.get("webhook-timestamp", "")
+
+        if not (webhook_id and webhook_sig and webhook_ts):
+            return Response(status=status.HTTP_401_UNAUTHORIZED)
+
+        try:
+            client = _get_dodo_client()
+            event = client.webhooks.unwrap(
+                request.body,
+                headers={
+                    "webhook-id": webhook_id,
+                    "webhook-signature": webhook_sig,
+                    "webhook-timestamp": webhook_ts,
+                },
+                key=webhook_secret,
+            )
+        except Exception as e:
+            logger.warning("Invalid Dodo webhook signature (id=%s): %s", webhook_id, e)
+            return Response(status=status.HTTP_401_UNAUTHORIZED)
+
+        # Idempotency check (prevents duplicate webhook processing)
+        dedup_key = f"dodo_webhook_{webhook_id}"
+        if not cache.add(dedup_key, True, timeout=7 * 24 * 3600):
+            return Response({"status": "duplicate_ignored"}, status=status.HTTP_200_OK)
+
+        try:
+            event_dict = (
+                event.model_dump()
+                if hasattr(event, "model_dump")
+                else (event if isinstance(event, dict) else event.__dict__)
+            )
+            event_type = event_dict.get("type")
+            data = event_dict.get("data") or {}
+            metadata = data.get("metadata") or {}
+            user_id = metadata.get("user_id")
+
+            # Fallback lookup by customer email if metadata was omitted on a sub-event
+            customer = data.get("customer") or {}
+            customer_email = customer.get("email")
+
+            with transaction.atomic():
+                user = None
+                if user_id and str(user_id).isdigit():
+                    user = (
+                        User.objects.select_for_update().filter(id=int(user_id)).first()
+                    )
+                if not user and customer_email:
+                    user = (
+                        User.objects.select_for_update()
+                        .filter(email__iexact=customer_email)
+                        .first()
+                    )
+
+                if not user:
+                    logger.warning("Dodo webhook %s could not resolve user", webhook_id)
+                    return Response(
+                        {"status": "ignored_no_user"}, status=status.HTTP_200_OK
+                    )
+
+                usage, _ = TaskUsage.objects.select_for_update().get_or_create(
+                    user=user
+                )
+                expected_product = config("DODO_PRO_PRODUCT_ID", default="").strip()
+                event_product = data.get("product_id")
+
+                # Prevent product/price spoofing if product_id is present on the payload
+                if (
+                    expected_product
+                    and event_product
+                    and event_product != expected_product
+                ):
+                    logger.warning(
+                        "Dodo webhook product mismatch: got %s", event_product
+                    )
+                    return Response(
+                        {"status": "ignored_product_mismatch"},
+                        status=status.HTTP_200_OK,
+                    )
+
+                # 1. Activated / Renewed / Succeeded -> Grant Pro
+                if event_type in (
+                    "subscription.active",
+                    "subscription.renewed",
+                    "payment.succeeded",
+                ):
+                    was_pro = usage.plan_type == "pro"
+                    usage.plan_type = "pro"
+                    usage.limit = 10000
+                    if event_type == "subscription.renewed":
+                        usage.count = 0  # Reset monthly counter on renewal
+                    usage.save()
+
+                    if not was_pro or event_type == "subscription.renewed":
+                        Notification.objects.create(
+                            user=user,
+                            type="product",
+                            title="Orkflo Pro Active"
+                            if not was_pro
+                            else "Pro Subscription Renewed",
+                            body="Your Pro plan is active with unlimited workflows and 10,000 monthly tasks.",
+                            link="/billing",
+                        )
+
+                # 2. Transient Payment Failure / On-Hold -> Grace Period (Keep Pro, Warn User)
+                elif event_type in ("payment.failed", "subscription.on_hold"):
+                    Notification.objects.create(
+                        user=user,
+                        type="usage_warning",
+                        title="Payment issue — action required",
+                        body="We couldn't process your renewal payment. Please update your payment method to avoid losing Pro access.",
+                        link="/billing",
+                    )
+
+                # 3. Terminal Cancellation / Expiration / Refund -> Downgrade to Free
+                elif event_type in (
+                    "subscription.cancelled",
+                    "subscription.canceled",
+                    "subscription.expired",
+                    "subscription.failed",
+                    "refund.succeeded",
+                ):
+                    usage.plan_type = "free"
+                    usage.limit = 1000
+                    usage.save()
+
+                    Notification.objects.create(
+                        user=user,
+                        type="usage_warning",
+                        title="Pro Plan Ended",
+                        body="Your subscription has ended and your account was moved to the Free tier (1,000 tasks/month).",
+                        link="/billing",
+                    )
+
+            return Response({"status": "processed"}, status=status.HTTP_200_OK)
+
+        except Exception:
+            cache.delete(dedup_key)  # Allow Dodo to retry if DB transaction failed
+            logger.exception("Error processing Dodo webhook %s", webhook_id)
+            return Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR)
